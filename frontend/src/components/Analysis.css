@@ -1,0 +1,47 @@
+/* Analysis Components Styles */
+
+.analysis-selector-wrapper {
+  margin-top: 32px;
+}
+
+.analysis-results-wrapper {
+  margin-top: 32px;
+  padding: 24px;
+  border: 1px solid #dfe6e5;
+  background: var(--white);
+  border-radius: 8px;
+}
+
+.error-message {
+  margin: 20px 0;
+  padding: 16px;
+  background-color: #fde7e2;
+  border-left: 4px solid #e96856;
+  color: #20343b;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.error-message strong {
+  display: block;
+  color: #e96856;
+  margin-bottom: 4px;
+  font-weight: 700;
+}
+
+@media (max-width: 700px) {
+  .analysis-selector-wrapper,
+  .analysis-results-wrapper {
+    margin-top: 24px;
+    padding: 16px 0;
+  }
+
+  .analysis-results-wrapper {
+    padding: 16px;
+  }
+
+  .error-message {
+    font-size: 12px;
+    padding: 12px;
+  }
+}
