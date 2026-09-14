@@ -9,6 +9,7 @@ import { SkillGapDashboard } from './components/SkillGapDashboard'
 import { InterviewPrepDashboard } from './components/InterviewPrepDashboard'
 import { MockInterviewDashboard } from './components/MockInterviewDashboard'
 import { CareerAssistantDashboard } from './components/CareerAssistantDashboard'
+import { AutomationDashboard } from './components/AutomationDashboard'
 import { ListControls } from './components/ListControls'
 import './App.css'
 
@@ -17,6 +18,7 @@ const navItems = [
   { label: 'Resumes', to: '/resumes', icon: 'file' },
   { label: 'Jobs', to: '/jobs', icon: 'briefcase' },
   { label: 'Applications', to: '/applications', icon: 'send' },
+  { label: 'Automation', to: '/automation', icon: 'play' },
   { label: 'Resume Analysis', to: '/analysis', icon: 'spark' },
   { label: 'Skill Gap', to: '/skill-gap', icon: 'spark' },
   { label: 'Interview Prep', to: '/interview-prep', icon: 'book' },
@@ -284,7 +286,7 @@ function AccessPage({ register = false }: { register?: boolean }) {
 }
 
 function App() {
-  return <Shell><Routes><Route path="/" element={<LandingPage />} /><Route path="/login" element={<AccessPage />} /><Route path="/register" element={<AccessPage register />} /><Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} /><Route path="/resumes" element={<ProtectedRoute><ResumesPage /></ProtectedRoute>} /><Route path="/jobs" element={<ProtectedRoute><JobsPage /></ProtectedRoute>} /><Route path="/jobs/:id" element={<ProtectedRoute><JobDetailsPage /></ProtectedRoute>} /><Route path="/applications" element={<ProtectedRoute><ApplicationsPage /></ProtectedRoute>} /><Route path="/analysis" element={<ProtectedRoute><AnalysisPage /></ProtectedRoute>} /><Route path="/skill-gap" element={<ProtectedRoute><SkillGapPage /></ProtectedRoute>} /><Route path="/interview-prep" element={<ProtectedRoute><InterviewPrepPage /></ProtectedRoute>} /><Route path="/mock-interview" element={<ProtectedRoute><MockInterviewPage /></ProtectedRoute>} /><Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />{navItems.slice(9).map((item) => <Route key={item.to} path={item.to} element={<ProtectedRoute><PlaceholderPage title={item.label} description="This workspace is ready for your career data and next best action." /></ProtectedRoute>} />)}<Route path="*" element={<LandingPage />} /></Routes></Shell>
+  return <Shell><Routes><Route path="/" element={<LandingPage />} /><Route path="/login" element={<AccessPage />} /><Route path="/register" element={<AccessPage register />} /><Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} /><Route path="/resumes" element={<ProtectedRoute><ResumesPage /></ProtectedRoute>} /><Route path="/jobs" element={<ProtectedRoute><JobsPage /></ProtectedRoute>} /><Route path="/jobs/:id" element={<ProtectedRoute><JobDetailsPage /></ProtectedRoute>} /><Route path="/applications" element={<ProtectedRoute><ApplicationsPage /></ProtectedRoute>} /><Route path="/automation" element={<ProtectedRoute><AutomationDashboard /></ProtectedRoute>} /><Route path="/analysis" element={<ProtectedRoute><AnalysisPage /></ProtectedRoute>} /><Route path="/skill-gap" element={<ProtectedRoute><SkillGapPage /></ProtectedRoute>} /><Route path="/interview-prep" element={<ProtectedRoute><InterviewPrepPage /></ProtectedRoute>} /><Route path="/mock-interview" element={<ProtectedRoute><MockInterviewPage /></ProtectedRoute>} /><Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />{navItems.slice(10).map((item) => <Route key={item.to} path={item.to} element={<ProtectedRoute><PlaceholderPage title={item.label} description="This workspace is ready for your career data and next best action." /></ProtectedRoute>} />)}<Route path="*" element={<LandingPage />} /></Routes></Shell>
 }
 
 export default App

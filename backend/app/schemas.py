@@ -247,6 +247,8 @@ class ApplicationResponse(ApplicationBase):
     location: str | None = None
     created_at: datetime
     updated_at: datetime
+    automation_status: str | None = None
+    last_automation_attempt: datetime | None = None
 
 
 class ResumeJobAnalysisRequest(BaseModel):
@@ -349,3 +351,182 @@ class DashboardResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     service: str
+
+
+# ============================================================================
+# V2 Automation Schemas
+# ============================================================================
+
+AUTOMATION_STATES = (
+    "DISCOVERED",
+    "JOB_SELECTED",
+    "APPLICATION_STARTED",
+    "FORM_IN_PROGRESS",
+    "WAITING_FOR_USER",
+    "UNKNOWN_SCENARIO",
+    "AI_RESOLUTION",
+    "FORM_COMPLETED",
+    "SUBMISSION_REVIEW",
+    "SUBMITTED",
+    "FAILED",
+    "PAUSED",
+)
+
+
+class CandidateProfileBase(BaseModel):
+    phone: str | None = Field(default=None, max_length=64)
+    location: str | None = Field(default=None, max_length=255)
+    linkedin_url: str | None = Field(default=None, max_length=1024)
+    github_url: str | None = Field(default=None, max_length=1024)
+    portfolio_url: str | None = Field(default=None, max_length=1024)
+    work_authorization: str | None = Field(default=None, max_length=120)
+    requires_sponsorship: bool | None = None
+    demographic_sharing_opt_in: bool = False
+    years_of_experience: int | None = Field(default=None, ge=0, le=70)
+    education_degree: str | None = Field(default=None, max_length=120)
+    education_field: str | None = Field(default=None, max_length=120)
+    education_school: str | None = Field(default=None, max_length=255)
+    answers_json: str | None = None
+
+
+class CandidateProfileCreate(CandidateProfileBase):
+    pass
+
+
+class CandidateProfileUpdate(CandidateProfileBase):
+    pass
+
+
+class CandidateProfileResponse(CandidateProfileBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationScenarioBase(BaseModel):
+    company: str = Field(default="*", max_length=255)
+    page_signature: str = Field(default="*", max_length=255)
+    field_key: str = Field(min_length=1, max_length=255)
+    element_strategy_json: str
+    action_type: str = Field(min_length=1, max_length=32)
+    value_source: str = Field(min_length=1, max_length=64)
+    static_value: str | None = None
+    confidence: str = "HIGH"
+    confidence_reason: str | None = None
+    is_active: bool = True
+    is_approved: bool = True
+
+
+class AutomationScenarioCreate(AutomationScenarioBase):
+    pass
+
+
+class AutomationScenarioUpdate(BaseModel):
+    element_strategy_json: str | None = None
+    action_type: str | None = None
+    value_source: str | None = None
+    static_value: str | None = None
+    confidence: str | None = None
+    confidence_reason: str | None = None
+    is_active: bool | None = None
+    is_approved: bool | None = None
+
+
+class AutomationScenarioResponse(AutomationScenarioBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID | None = None
+    version: int
+    times_used: int
+    last_used_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationActionLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    run_id: UUID
+    action_type: str
+    action_source: str
+    step_name: str | None = None
+    selector_used: str | None = None
+    value_used: str | None = None
+    confidence: str
+    confidence_reason: str | None = None
+    result: str
+    error_message: str | None = None
+    screenshot_path: str | None = None
+    created_at: datetime
+
+
+class AutomationRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    job_id: UUID | None = None
+    application_id: UUID | None = None
+    company: str
+    job_title: str
+    job_url: str | None = None
+    status: str
+    current_step: str | None = None
+    error_message: str | None = None
+    requires_user_action: bool = False
+    user_prompt: str | None = None
+    user_prompt_context_json: str | None = None
+    suggested_action_json: str | None = None
+    user_response_json: str | None = None
+    screenshot_path: str | None = None
+    scenarios_used_count: int = 0
+    started_at: datetime
+    completed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationRunDetailResponse(AutomationRunResponse):
+    action_logs: list[AutomationActionLogResponse] = []
+
+
+class AutomationSettingUpdate(BaseModel):
+    is_enabled: bool | None = None
+    schedule_interval: str | None = Field(default=None, max_length=32)
+    auto_submit: bool | None = None
+    allowed_companies_json: str | None = None
+    max_daily_applications: int | None = Field(default=None, ge=1, le=100)
+    delay_between_actions_ms: int | None = Field(default=None, ge=100, le=5000)
+
+
+class AutomationSettingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    is_enabled: bool
+    schedule_interval: str
+    auto_submit: bool
+    allowed_companies_json: str | None = None
+    max_daily_applications: int
+    delay_between_actions_ms: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationTriggerRequest(BaseModel):
+    job_id: UUID | None = None
+    job_url: str | None = None
+    company: str | None = None
+    job_title: str | None = None
+
+
+class AutomationInterventionRequest(BaseModel):
+    action: str = Field(pattern="^(approve|edit|reject|pause)$")
+    value: str | None = None
+    remember_scenario: bool = True

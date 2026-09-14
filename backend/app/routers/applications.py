@@ -27,7 +27,29 @@ def owned_job(job_id: UUID, user_id: UUID, database: Session) -> Job:
 
 
 def to_response(application: Application) -> ApplicationResponse:
-    return ApplicationResponse.model_validate({**{field: getattr(application, field) for field in ("id", "job_id", "status", "application_date", "interview_date", "salary", "recruiter_name", "recruiter_email", "notes", "created_at", "updated_at")}, "company": application.job.company, "title": application.job.title, "location": application.job.location})
+    return ApplicationResponse.model_validate({
+        **{
+            field: getattr(application, field)
+            for field in (
+                "id",
+                "job_id",
+                "status",
+                "application_date",
+                "interview_date",
+                "salary",
+                "recruiter_name",
+                "recruiter_email",
+                "notes",
+                "created_at",
+                "updated_at",
+                "automation_status",
+                "last_automation_attempt",
+            )
+        },
+        "company": application.job.company,
+        "title": application.job.title,
+        "location": application.job.location,
+    })
 
 
 @router.post(
