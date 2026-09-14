@@ -24,6 +24,16 @@ Job searches often spread information across resumes, job boards, notes, spreads
 - AI career assistant using the authenticated user's resume, jobs, applications, skill gaps, and interview context.
 - Dashboard analytics for application totals, offers, rejections, interviews, upcoming interviews, skill gaps, and recent activity.
 - Synthetic development seed data that is opt-in and never runs during application startup.
+- **V2 Agentic Job Application Automation**:
+  - Resilient Playwright browser automation engine for career portals.
+  - Multi-company adapter architecture (Generic adapter, Greenhouse/Lever/Workday/Taleo support, extensible BaseAdapter).
+  - 12-state transition engine with pause, resume, cancel, and human-in-the-loop interventions.
+  - Self-healing Scenario Memory: learns unknown form fields and saves reusable, user-approved patterns.
+  - AI reasoning agent with DOM context extractor and deterministic local fallback.
+  - Candidate application profile with normalized personal, contact, work authorization, and demographic fields.
+  - Comprehensive safety guards: hard pause on CAPTCHA/bot challenges, auto-pause on sensitive/legal/demographic questions, and approval required for final submission.
+  - Automation dashboard with live run tracker, human intervention queue, scenario memory editor, and profile settings.
+  - Periodic background scheduler with daily application rate-limiting and duplicate prevention.
 
 ## Technology Stack
 
@@ -161,6 +171,7 @@ The API is served under `/api`. FastAPI generates interactive documentation at `
 | Mock Interviews | `POST /api/mock-interviews`, `GET /api/mock-interviews`, `GET /api/mock-interviews/{id}`, `POST /api/mock-interviews/{id}/answers/{answer_id}` |
 | AI Assistant | `POST /api/assistant/chat` |
 | Analytics | `GET /api/dashboard` |
+| Automation | `GET/PUT /api/automation/profile`, `GET /api/automation/runs`, `GET /api/automation/runs/{id}`, `POST /api/automation/runs/trigger`, `POST /api/automation/runs/{id}/pause`, `POST /api/automation/runs/{id}/resume`, `POST /api/automation/runs/{id}/intervene`, `GET/PATCH/DELETE /api/automation/scenarios`, `GET/PUT /api/automation/settings` |
 
 All protected routes require a bearer access token. Resource lookups include the authenticated user's ID, so another user's resources are not exposed through an ID alone.
 
@@ -305,6 +316,105 @@ After running migrations from `backend`:
 The seed creates one synthetic account, resumes, jobs, varied application statuses, skills, skill gaps, interview preparation questions, a completed mock interview, and resume/job analysis data. Rerunning it replaces only the synthetic demo account.
 
 The local demo credentials are printed by the command. They are for development only and must not be reused in a deployed environment.
+
+## V2 Agentic Job Application Automation Platform
+
+CareerPilot V2 extends the core platform with autonomous browser automation, company career portal adapters, scenario-based self-healing memory, and strict human-in-the-loop safety.
+
+```mermaid
+flowchart TD
+    User[User / Background Scheduler] -->|Trigger Run| Engine[Automation Engine]
+    Engine --> SM[12-State Machine]
+    SM --> Adapter[Company Adapter Registry]
+    Adapter --> Portal[Career Portal Page via Playwright]
+    Portal --> FormState[Form Analysis]
+    FormState -->|Match Pattern| ScenReg[Scenario Registry]
+    FormState -->|Unknown Field| AIDOM[DOM Extractor + AI Agent]
+    AIDOM --> Confidence[Confidence Evaluator]
+    Confidence -->|HIGH >= 0.85| AutoFill[Auto-fill Field]
+    Confidence -->|MEDIUM/LOW < 0.85| HITL[Pause & Await Human Input]
+    FormState -->|CAPTCHA / Bot Detected| HardStop[Pause: Manual Action Required]
+    FormState -->|Demographic / Legal / Sensitive| SafetyGuard[Pause: User Review Required]
+    HITL --> UserInput[User Answers in Dashboard]
+    UserInput --> Memory[Self-Healing Scenario Memory]
+    Memory --> ScenReg
+    AutoFill --> FinalCheck{Auto-submit Enabled?}
+    FinalCheck -->|No default| ConfirmSubmit[Pause: Final Review Required]
+    FinalCheck -->|Yes| Submit[Submit Application]
+    ConfirmSubmit --> UserConfirm[User Approves Submission]
+    UserConfirm --> Submit
+    Submit --> Success[Update Application to APPLIED & Save Run]
+```
+
+### Key Architectural Pillars
+
+1. **State Machine (`app/automation/state_machine.py`)**:
+   Enforces a deterministic 12-state lifecycle: `DISCOVERED`, `APPLICATION_STARTED`, `PORTAL_OPENED`, `FORM_IN_PROGRESS`, `FILL_FIELDS`, `UPLOAD_RESUME`, `UNKNOWN_SCENARIO`, `AI_RESOLUTION`, `WAITING_FOR_USER`, `REVIEW_REQUIRED`, `SUBMITTED`, `FAILED`, and `PAUSED`. Every state change is recorded with timestamps and actionable messages.
+
+2. **Generic & Company-Specific Adapters (`app/automation/companies/`)**:
+   - `BaseCompanyAdapter`: Standard interface defining `can_handle()`, `extract_job_details()`, `fill_personal_info()`, `upload_resume()`, `fill_experience()`, `fill_questions()`, `handle_multi_page()`, and `submit_application()`.
+   - `GenericCompanyAdapter`: Uses resilient, multi-tiered semantic heuristics (labels, ARIA roles, names, placeholders, IDs) to handle any modern job portal (Greenhouse, Lever, Workday, Taleo, etc.).
+   - `CompanyAdapterRegistry`: Registers and selects the best adapter by URL matching or name priority.
+
+3. **Confidence-Driven Decision Engine (`app/automation/confidence.py`)**:
+   - Scores every action: `HIGH` (0.85 - 1.0), `MEDIUM` (0.60 - 0.84), `LOW` (0.00 - 0.59).
+   - High confidence with non-sensitive fields executes autonomously.
+   - Low/Medium confidence, sensitive fields, or unknown dropdowns pause with `WAITING_FOR_USER` to prevent errors.
+
+4. **Scenario Memory & Self-Healing (`app/automation/scenarios/`)**:
+   - Solves the brittle-selector problem of traditional web scrapers.
+   - When an unknown question is encountered, the DOM context is extracted and human feedback is requested.
+   - Once answered, the pattern is persisted in PostgreSQL as a reusable `AutomationScenario`.
+   - Subsequent applications matching the page signature or field key reuse the verified answer without re-prompting.
+
+5. **AI Reasoning Agent (`app/automation/ai/`)**:
+   - `DOMContextExtractor`: Extracts clean, sanitized form context (labels, surrounding text, input types, options, aria attributes).
+   - `AutomationAIAgent`: Evaluates the context against the candidate's profile and returns structured recommendations (`action_type`, `target_value`, `confidence`, `confidence_reason`).
+   - Automatically falls back to deterministic local rule evaluation when no remote LLM API key is present.
+
+6. **Safety & Responsible Automation Guarantees (`app/automation/safety.py`)**:
+   - **Zero CAPTCHA / Bot Challenge Bypass**: Never attempts to bypass Cloudflare, reCAPTCHA, or hCaptcha. Immediately pauses with clear status `"Manual action required: CAPTCHA / Bot verification"`.
+   - **No Hallucinated Candidate Information**: Never guesses unprovided candidate data. Missing information transitions to human intervention.
+   - **Demographic & Legal Question Protection**: EEO, diversity, veteran, disability, and non-compete questions require explicit opt-in and user approval.
+   - **Default Final Submission Gate**: `auto_submit` is disabled by default. Applications require the user to review the filled form and click "Submit".
+
+7. **Background Scheduler (`app/automation/scheduler.py`)**:
+   - Runs asynchronous background checks for newly discovered jobs.
+   - Prevents duplicate applications to the same job.
+   - Respects user-configured daily limits (`max_daily_applications`) and action delays (`delay_between_actions_ms`).
+
+### Playwright Browser Setup
+
+Playwright is required for browser automation. After installing python requirements:
+
+```bash
+cd backend
+.venv/bin/playwright install chromium
+```
+
+### Automation Test Suite (Unit & 12 Scenario Tests)
+
+The test suite covers all 12 edge cases against an in-memory HTTP mock portal:
+
+```bash
+cd backend
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_automation_playwright_scenarios.py -v
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_automation_unit.py -v
+```
+
+Scenarios verified:
+1. `test_scenario_1_standard_application_flow`: Clean multi-field form completion.
+2. `test_scenario_2_file_upload_resume`: Resume PDF attachment to input[type=file].
+3. `test_scenario_3_multi_page_application`: Stepped form navigation (Next -> Submit).
+4. `test_scenario_4_unknown_form_field_hitl`: Pause and scenario memory learning on novel fields.
+5. `test_scenario_5_captcha_bot_challenge_pause`: Immediate hard stop on CAPTCHA.
+6. `test_scenario_6_dynamic_dropdown_and_radio`: Native and custom selects/radio groups.
+7. `test_scenario_7_validation_error_recovery`: Form validation error detection and self-healing.
+8. `test_scenario_8_session_timeout_handling`: Session expiration detection without crash.
+9. `test_scenario_9_work_authorization_sponsorship`: Sensitive legal guard pause.
+10. `test_scenario_10_voluntary_demographic_disclosure`: EEO/Demographic opt-in pause.
+11. `test_scenario_11_duplicate_application_prevention`: Duplicate submission prevention.
+12. `test_scenario_12_human_intervention_resume`: Dashboard human intervention approval and execution.
 
 ## Deployment Instructions
 

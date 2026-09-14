@@ -11,6 +11,7 @@ from .routers.jobs import router as jobs_router
 from .routers.interviews import router as interviews_router
 from .routers.mock_interviews import router as mock_interviews_router
 from .routers.resumes import router as resumes_router
+from .routers.automation import router as automation_router
 from .schemas import HealthResponse
 
 OPENAPI_TAGS = [
@@ -25,13 +26,14 @@ OPENAPI_TAGS = [
     {"name": "Mock Interviews", "description": "Run practice interviews and submit answers for evaluation."},
     {"name": "AI Assistant", "description": "Ask career questions using the authenticated user's workspace context."},
     {"name": "Analytics", "description": "View application, interview, and skill-gap dashboard metrics."},
+    {"name": "Automation", "description": "Agentic browser automation, candidate profiles, and scenario memory."},
     {"name": "Health", "description": "Service availability checks."},
 ]
 
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    version="0.1.0",
+    version="0.2.0",
     description="Backend API for CareerPilot. Protected endpoints require a bearer access token.",
     openapi_tags=OPENAPI_TAGS,
 )
@@ -44,6 +46,7 @@ app.include_router(jobs_router)
 app.include_router(interviews_router)
 app.include_router(mock_interviews_router)
 app.include_router(resumes_router)
+app.include_router(automation_router)
 
 app.add_middleware(
     CORSMiddleware,
