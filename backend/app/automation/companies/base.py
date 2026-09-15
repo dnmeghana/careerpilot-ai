@@ -12,6 +12,8 @@ class DiscoveredJob:
     url: str
     location: Optional[str] = None
     description: Optional[str] = None
+    requisition_id: Optional[str] = None
+    match_score: Optional[float] = None
 
 
 @dataclass

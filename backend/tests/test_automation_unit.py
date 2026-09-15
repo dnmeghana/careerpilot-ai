@@ -365,3 +365,221 @@ def test_automation_api_endpoints(client: TestClient):
     # Delete scenario
     del_res = client.delete(f"/api/automation/scenarios/{scen_id}", headers=auth_header)
     assert del_res.status_code == 204
+
+
+# ============================================================================
+# 7. URL & Page Title Tracking and Access Denied Tests
+# ============================================================================
+
+def test_detect_access_denied():
+    from app.automation.safety import detect_access_denied
+
+    # Test title match
+    blocked, reason = detect_access_denied("Normal body text", title="403 Forbidden - Access Denied")
+    assert blocked is True
+    assert "access was denied" in reason.lower()
+
+    # Test cloudflare title
+    blocked, reason = detect_access_denied("Checking your browser", title="Just a moment... | Cloudflare")
+    assert blocked is True
+    assert "cloudflare" in reason.lower()
+
+    # Test body phrase match
+    blocked, reason = detect_access_denied(
+        "<h1>Error</h1><p>You don't have permission to access this resource. Ray ID: 12345</p>",
+        title="Error"
+    )
+    assert blocked is True
+    assert "access" in reason.lower()
+
+    # Test normal page
+    blocked, reason = detect_access_denied(
+        "<h1>Welcome to Job Portal</h1><form><input name='name'/></form>",
+        title="Careers at Acme"
+    )
+    assert blocked is False
+    assert reason == ""
+
+
+def test_api_returns_current_url_and_page_title(client: TestClient):
+    auth_header = register_user(client, "url-tracker@example.com")
+
+    # Directly verify through API with an injected run
+    # Get the db session from dependency override or insert via endpoint
+    from app.models import AutomationActionLog
+
+    # Create run via trigger endpoint
+    from unittest.mock import patch
+
+    async def mock_execute_track(db, run_id):
+        run = db.get(AutomationRun, run_id)
+        if run:
+            run.current_url = "https://amazon.jobs/en/jobs/123/apply"
+            run.page_title = "Amazon Job Application - SDET"
+            run.status = "WAITING_FOR_USER"
+            run.requires_user_action = True
+            run.user_prompt = "Access Denied: Cloudflare verification required"
+            log = AutomationActionLog(
+                run_id=run.id,
+                action_type="PAUSE",
+                step_name="Access Denied",
+                confidence="LOW",
+                confidence_reason="Access Denied detected: Cloudflare",
+                action_source="BOT_DETECTION",
+                current_url="https://amazon.jobs/en/jobs/123/apply",
+                page_title="Amazon Job Application - SDET",
+            )
+            db.add(log)
+            db.commit()
+
+    with patch.object(PlaywrightAutomationEngine, "execute_run", side_effect=mock_execute_track):
+        trigger_res = client.post(
+            "/api/automation/runs/trigger",
+            headers=auth_header,
+            json={
+                "company": "Amazon",
+                "job_title": "SDET",
+                "job_url": "https://amazon.jobs/en/jobs/123",
+            },
+        )
+        assert trigger_res.status_code == 201
+        run_id = trigger_res.json()["id"]
+
+        # 1. GET /api/automation/runs
+        list_res = client.get("/api/automation/runs", headers=auth_header)
+        assert list_res.status_code == 200
+        runs = list_res.json()
+        target_run = next(r for r in runs if r["id"] == run_id)
+        assert target_run["current_url"] == "https://amazon.jobs/en/jobs/123/apply"
+        assert target_run["page_title"] == "Amazon Job Application - SDET"
+
+        # 2. GET /api/automation/runs/{run_id}
+        detail_res = client.get(f"/api/automation/runs/{run_id}", headers=auth_header)
+        assert detail_res.status_code == 200
+        detail = detail_res.json()
+        assert detail["current_url"] == "https://amazon.jobs/en/jobs/123/apply"
+        assert detail["page_title"] == "Amazon Job Application - SDET"
+        assert len(detail["action_logs"]) >= 1
+        assert detail["action_logs"][0]["current_url"] == "https://amazon.jobs/en/jobs/123/apply"
+        assert detail["action_logs"][0]["page_title"] == "Amazon Job Application - SDET"
+
+
+def test_is_valid_http_url_validation():
+    from app.automation.engine import is_valid_http_url
+
+    assert is_valid_http_url(None) is False
+    assert is_valid_http_url("") is False
+    assert is_valid_http_url("   ") is False
+    assert is_valid_http_url("about:blank") is False
+    assert is_valid_http_url("ABOUT:BLANK") is False
+    assert is_valid_http_url("javascript:alert(1)") is False
+    assert is_valid_http_url("chrome://settings") is False
+    assert is_valid_http_url("file:///etc/passwd") is False
+
+    assert is_valid_http_url("http://example.com") is True
+    assert is_valid_http_url("https://amazon.jobs/en/jobs/12345/apply") is True
+    assert is_valid_http_url("https://careers.google.com/jobs/results/?q=software") is True
+
+
+@pytest.mark.asyncio
+async def test_update_page_state_rejects_about_blank():
+    from unittest.mock import AsyncMock, MagicMock
+    from app.automation.engine import PlaywrightAutomationEngine
+
+    engine = PlaywrightAutomationEngine()
+    run = AutomationRun(
+        id=uuid4(),
+        user_id=uuid4(),
+        company="TestCorp",
+        job_title="Engineer",
+        status="IN_PROGRESS",
+    )
+
+    # Mock page sitting at about:blank
+    mock_page = MagicMock()
+    mock_page.url = "about:blank"
+    mock_page.is_closed.return_value = False
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.context.pages = [mock_page]
+
+    url, title = await engine._update_page_state(mock_page, run)
+    assert url == ""
+    assert title == ""
+    assert run.current_url is None
+    assert run.page_title is None
+
+    # Now mock page navigated to real job application URL
+    mock_page.url = "https://testcorp.com/careers/apply/123"
+    mock_page.title = AsyncMock(return_value="Apply for Engineer - TestCorp")
+
+    url, title = await engine._update_page_state(mock_page, run)
+    assert url == "https://testcorp.com/careers/apply/123"
+    assert title == "Apply for Engineer - TestCorp"
+    assert run.current_url == "https://testcorp.com/careers/apply/123"
+    assert run.page_title == "Apply for Engineer - TestCorp"
+
+
+@pytest.mark.asyncio
+async def test_update_page_state_discovers_opened_tabs():
+    from unittest.mock import AsyncMock, MagicMock
+    from app.automation.engine import PlaywrightAutomationEngine
+
+    engine = PlaywrightAutomationEngine()
+    run = AutomationRun(
+        id=uuid4(),
+        user_id=uuid4(),
+        company="TestCorp",
+        job_title="Engineer",
+        status="IN_PROGRESS",
+    )
+
+    # Mock initial blank tab and new popup tab
+    blank_page = MagicMock()
+    blank_page.url = "about:blank"
+    blank_page.is_closed.return_value = False
+    blank_page.title = AsyncMock(return_value="")
+
+    popup_page = MagicMock()
+    popup_page.url = "https://careers.example.com/application/form"
+    popup_page.is_closed.return_value = False
+    popup_page.title = AsyncMock(return_value="Job Application Portal")
+
+    blank_page.context.pages = [blank_page, popup_page]
+
+    # Passing blank_page as active_page, engine should inspect context.pages and pick popup_page
+    url, title = await engine._update_page_state(blank_page, run)
+    assert url == "https://careers.example.com/application/form"
+    assert title == "Job Application Portal"
+    assert run.current_url == "https://careers.example.com/application/form"
+    assert run.page_title == "Job Application Portal"
+
+
+def test_record_log_sanitizes_about_blank():
+    from unittest.mock import MagicMock
+    from app.automation.engine import PlaywrightAutomationEngine
+
+    engine = PlaywrightAutomationEngine()
+    mock_db = MagicMock()
+    run = AutomationRun(
+        id=uuid4(),
+        user_id=uuid4(),
+        company="TestCorp",
+        job_title="Engineer",
+        status="IN_PROGRESS",
+    )
+
+    log = engine._record_log(
+        db=mock_db,
+        run=run,
+        action_type="PAUSE",
+        action_source="HUMAN_INTERVENTION",
+        step_name="Submission Review",
+        confidence="HIGH",
+        current_url="about:blank",
+        page_title="about:blank",
+    )
+
+    assert log.current_url is None
+    assert log.page_title is None
+
+

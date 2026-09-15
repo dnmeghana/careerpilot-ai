@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session, joinedload
 from ..auth import get_current_user
 from ..automation.companies.registry import get_adapter_registry
 from ..automation.engine import PlaywrightAutomationEngine
+from ..automation.matcher import (
+    JobMatchScorer,
+    SelectedJobIdentity,
+    extract_requisition_id_from_url_or_text,
+)
 from ..automation.scenarios.memory import ScenarioMemoryService
 from ..automation.state_machine import ApplicationStateMachine, AutomationState
 from ..database import get_db
@@ -39,6 +44,9 @@ from ..schemas import (
     AutomationTriggerRequest,
     CandidateProfileResponse,
     CandidateProfileUpdate,
+    JobMatchScoreRequest,
+    JobMatchScoreResponse,
+    SelectedJobIdentitySchema,
 )
 
 router = APIRouter(prefix="/api/automation", tags=["Automation"])
@@ -87,18 +95,88 @@ def update_candidate_profile(
 # Automation Runs Endpoints
 # ============================================================================
 
+def resolve_selected_job_identity(run: AutomationRun, database: Optional[Session] = None) -> Optional[SelectedJobIdentitySchema]:
+    """Extracts or resolves the immutable SelectedJobIdentity for a run."""
+    if run.user_prompt_context_json:
+        try:
+            ctx = json.loads(run.user_prompt_context_json)
+            if "selected_job_identity" in ctx and isinstance(ctx["selected_job_identity"], dict):
+                return SelectedJobIdentitySchema(**ctx["selected_job_identity"])
+        except Exception:
+            pass
+
+    location = None
+    if run.job_id and database:
+        job = database.scalar(select(Job).where(Job.id == run.job_id))
+        if job:
+            location = job.location
+
+    req_id = extract_requisition_id_from_url_or_text(run.job_url)
+    return SelectedJobIdentitySchema(
+        company=run.company,
+        exact_title=run.job_title,
+        job_url=run.job_url or "",
+        job_id=run.job_id,
+        requisition_id=req_id,
+        location=location,
+        source="saved_job" if run.job_id else "portal",
+    )
+
+
+def serialize_run_response(run: AutomationRun, database: Optional[Session] = None) -> AutomationRunResponse:
+    """Serializes AutomationRun into AutomationRunResponse with selected_job_identity populated."""
+    resp = AutomationRunResponse.model_validate(run)
+    resp.selected_job_identity = resolve_selected_job_identity(run, database)
+    return resp
+
+
+@router.post("/jobs/match-score", response_model=JobMatchScoreResponse)
+def calculate_job_match_score(
+    payload: JobMatchScoreRequest,
+    current_user: User = Depends(get_current_user),
+) -> JobMatchScoreResponse:
+    """Calculates multi-factor semantic similarity score between target role criteria and candidate job."""
+    scorer = JobMatchScorer()
+    result = scorer.score_job(
+        target_role=payload.target_role,
+        candidate_title=payload.candidate_title,
+        candidate_description=payload.candidate_description,
+        candidate_location=payload.candidate_location,
+        candidate_skills=payload.candidate_skills,
+        user_skills=payload.user_skills,
+        user_location=payload.user_location,
+        user_experience_years=payload.user_experience_years,
+        employment_type_pref=payload.employment_type_pref,
+    )
+    return JobMatchScoreResponse(
+        match_score=result.match_score,
+        is_match=result.is_match,
+        title_score=result.title_score,
+        skills_score=result.skills_score,
+        location_score=result.location_score,
+        experience_score=result.experience_score,
+        normalized_target_title=result.normalized_target_title,
+        normalized_job_title=result.normalized_job_title,
+        reasons=result.reasons,
+        breakdown=result.breakdown,
+    )
+
+
 @router.get("/runs", response_model=List[AutomationRunResponse])
 def list_automation_runs(
     status_filter: Optional[str] = Query(default=None, alias="status"),
     current_user: User = Depends(get_current_user),
     database: Session = Depends(get_db),
 ) -> List[AutomationRun]:
+) -> List[AutomationRunResponse]:
     """List automation runs owned by current user."""
     query = select(AutomationRun).where(AutomationRun.user_id == current_user.id)
     if status_filter:
         query = query.where(AutomationRun.status == status_filter)
     query = query.order_by(AutomationRun.created_at.desc())
     return list(database.scalars(query).all())
+    runs = list(database.scalars(query).all())
+    return [serialize_run_response(r, database) for r in runs]
 
 
 @router.get("/runs/{run_id}", response_model=AutomationRunDetailResponse)
@@ -116,6 +194,8 @@ def get_automation_run(
     if not run:
         raise HTTPException(status_code=404, detail="Automation run not found.")
 
+    selected_identity = resolve_selected_job_identity(run, database)
+
     return AutomationRunDetailResponse(
         id=run.id,
         user_id=run.user_id,
@@ -124,6 +204,8 @@ def get_automation_run(
         company=run.company,
         job_title=run.job_title,
         job_url=run.job_url,
+        current_url=run.current_url,
+        page_title=run.page_title,
         status=run.status,
         current_step=run.current_step,
         error_message=run.error_message,
@@ -134,6 +216,7 @@ def get_automation_run(
         user_response_json=run.user_response_json,
         screenshot_path=run.screenshot_path,
         scenarios_used_count=run.scenarios_used_count,
+        selected_job_identity=selected_identity,
         started_at=run.started_at,
         completed_at=run.completed_at,
         created_at=run.created_at,
@@ -153,6 +236,8 @@ async def trigger_automation_run(
     database: Session = Depends(get_db),
 ) -> AutomationRun:
     """Queue and start an automation run for a saved job or URL."""
+) -> AutomationRunResponse:
+    """Queue and start an automation run for a saved job or URL with persisted job identity."""
     job: Optional[Job] = None
     if payload.job_id:
         job = database.scalar(select(Job).where(Job.id == payload.job_id, Job.user_id == current_user.id))
@@ -165,6 +250,21 @@ async def trigger_automation_run(
 
     if not job_url:
         raise HTTPException(status_code=400, detail="A job posting URL is required to start automation.")
+
+    requisition_id = payload.requisition_id or extract_requisition_id_from_url_or_text(job_url)
+    location = payload.location or (job.location if job else None)
+    source = payload.source or ("saved_job" if job else "manual")
+
+    # Persist exact selected job identity
+    selected_identity = SelectedJobIdentity(
+        company=company,
+        exact_title=job_title,
+        job_url=job_url,
+        job_id=str(job.id) if job else None,
+        requisition_id=requisition_id,
+        location=location,
+        source=source,
+    )
 
     # Check or create Application tracking record
     app_record: Optional[Application] = None
@@ -183,6 +283,8 @@ async def trigger_automation_run(
             database.commit()
             database.refresh(app_record)
 
+    context_data = {"selected_job_identity": selected_identity.to_dict()}
+
     run = AutomationRun(
         user_id=current_user.id,
         job_id=job.id if job else None,
@@ -192,6 +294,7 @@ async def trigger_automation_run(
         job_url=job_url,
         status="DISCOVERED",
         current_step="Queued",
+        user_prompt_context_json=json.dumps(context_data),
     )
     database.add(run)
     database.commit()
@@ -202,6 +305,7 @@ async def trigger_automation_run(
     background_tasks.add_task(engine.execute_run, database, run.id)
 
     return run
+    return serialize_run_response(run, database)
 
 
 @router.post("/runs/{run_id}/pause", response_model=AutomationRunResponse)

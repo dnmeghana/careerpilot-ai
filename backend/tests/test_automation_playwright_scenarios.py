@@ -21,6 +21,7 @@ from app.automation.state_machine import AutomationState
 from app.database import Base
 from app.models import (
     Application,
+    AutomationActionLog,
     AutomationRun,
     AutomationSetting,
     CandidateProfile,
@@ -138,6 +139,12 @@ class MockPortalHandler(http.server.SimpleHTTPRequestHandler):
                     <label for="email">Email</label><input id="email" name="email" type="email" value="jane@example.com" /><br/>
                     <button type="submit">Submit Application</button>
                 </form></body></html>
+            """,
+            "/13_access_denied": """
+                <!DOCTYPE html><html><head><title>Access Denied - 403</title></head><body>
+                <h1>403 Forbidden</h1>
+                <p>You don't have permission to access this resource. Ray ID: 871a2b3c4d5e</p>
+                </body></html>
             """,
             "/success": """
                 <!DOCTYPE html><html><head><title>Submitted</title></head><body>
@@ -476,3 +483,66 @@ async def test_scenario_12_final_submission_requiring_approval(mock_server: str,
     assert result.status == AutomationState.WAITING_FOR_USER.value
     assert result.requires_user_action is True
     assert "review and approve" in (result.user_prompt or "").lower()
+    assert result.current_url == f"{mock_server}/12_submission_review"
+    assert result.page_title == "Final Review"
+    assert result.current_url != "about:blank"
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_restores_navigation_from_about_blank(mock_server: str, db_session: Session, tmp_path: Path):
+    """Verifies that resuming a run in WAITING_FOR_USER/PAUSED navigates away from initial about:blank."""
+    user, resume, profile = create_candidate_context(db_session, tmp_path)
+    engine = PlaywrightAutomationEngine(headless=True)
+
+    expected_url = f"{mock_server}/12_submission_review"
+    run = AutomationRun(
+        user_id=user.id,
+        company="MockCorp",
+        job_title="Software Engineer",
+        job_url=expected_url,
+        current_url=expected_url,
+        page_title="Final Review",
+        status="PAUSED",  # Resuming a paused/in-progress run
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    # When engine executes a resumed run, Playwright opens a new context/page at about:blank
+    # Engine must restore navigation to expected_url and never checkpoint about:blank
+    result = await engine.execute_run(db_session, run.id)
+    assert result.current_url == expected_url
+    assert result.current_url != "about:blank"
+    assert result.page_title == "Final Review"
+
+
+@pytest.mark.asyncio
+async def test_scenario_13_access_denied_and_url_tracking(mock_server: str, db_session: Session, tmp_path: Path):
+    """Scenario 13: Access denied stops automation, records current_url and page_title, pauses for human intervention."""
+    user, resume, profile = create_candidate_context(db_session, tmp_path)
+    engine = PlaywrightAutomationEngine(headless=True)
+
+    expected_url = f"{mock_server}/13_access_denied"
+    run = AutomationRun(
+        user_id=user.id,
+        company="MockCorp",
+        job_title="Software Engineer",
+        job_url=expected_url,
+        status="DISCOVERED",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    result = await engine.execute_run(db_session, run.id)
+    assert result.status == AutomationState.WAITING_FOR_USER.value
+    assert result.requires_user_action is True
+    assert "access was denied" in (result.user_prompt or "").lower()
+    assert result.current_url == expected_url
+    assert "access denied" in (result.page_title or "").lower()
+
+    # Verify action logs also have current_url and page_title recorded
+    action_logs = db_session.query(AutomationActionLog).filter_by(run_id=run.id).all()
+    assert len(action_logs) > 0
+    latest_log = action_logs[-1]
+    assert latest_log.current_url == expected_url
+    assert "access denied" in (latest_log.page_title or "").lower()
+

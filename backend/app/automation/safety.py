@@ -143,6 +143,23 @@ def check_element_safety(
     )
 
 
+ACCESS_DENIED_PHRASES = (
+    "access denied",
+    "403 forbidden",
+    "you don't have permission to access",
+    "access to this page has been denied",
+    "request blocked by security",
+    "unauthorized access",
+    "your ip has been blocked",
+    "blocked by security policy",
+    "permission denied",
+    "access restricted",
+    "cloudflare",
+    "attention required",
+    "just a moment...",
+)
+
+
 def detect_security_barrier(page_content: str) -> tuple[bool, str]:
     """Detect if page presents CAPTCHA, Cloudflare, or MFA challenge."""
     content_lower = page_content.lower()
@@ -150,4 +167,14 @@ def detect_security_barrier(page_content: str) -> tuple[bool, str]:
         if text in content_lower:
             return True, f"Security challenge detected: '{text}'. Manual action required."
     return False, ""
+
+
+def detect_access_denied(page_content: str, title: str = "") -> tuple[bool, str]:
+    """Detect if page presents an access denied, 403, or security block barrier."""
+    combined = f"{title} {page_content}".lower()
+    for phrase in ACCESS_DENIED_PHRASES:
+        if phrase in combined:
+            return True, f"The automation cannot continue because access was denied ({phrase})."
+    return False, ""
+
 

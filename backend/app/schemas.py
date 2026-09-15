@@ -457,12 +457,24 @@ class AutomationActionLogResponse(BaseModel):
     step_name: str | None = None
     selector_used: str | None = None
     value_used: str | None = None
+    current_url: str | None = None
+    page_title: str | None = None
     confidence: str
     confidence_reason: str | None = None
     result: str
     error_message: str | None = None
     screenshot_path: str | None = None
     created_at: datetime
+
+
+class SelectedJobIdentitySchema(BaseModel):
+    company: str
+    exact_title: str
+    job_url: str
+    job_id: UUID | None = None
+    requisition_id: str | None = None
+    location: str | None = None
+    source: str = "portal"
 
 
 class AutomationRunResponse(BaseModel):
@@ -475,6 +487,8 @@ class AutomationRunResponse(BaseModel):
     company: str
     job_title: str
     job_url: str | None = None
+    current_url: str | None = None
+    page_title: str | None = None
     status: str
     current_step: str | None = None
     error_message: str | None = None
@@ -485,6 +499,7 @@ class AutomationRunResponse(BaseModel):
     user_response_json: str | None = None
     screenshot_path: str | None = None
     scenarios_used_count: int = 0
+    selected_job_identity: SelectedJobIdentitySchema | None = None
     started_at: datetime
     completed_at: datetime | None = None
     created_at: datetime
@@ -524,9 +539,37 @@ class AutomationTriggerRequest(BaseModel):
     job_url: str | None = None
     company: str | None = None
     job_title: str | None = None
+    requisition_id: str | None = None
+    location: str | None = None
+    source: str = "manual"
 
 
 class AutomationInterventionRequest(BaseModel):
     action: str = Field(pattern="^(approve|edit|reject|pause)$")
     value: str | None = None
     remember_scenario: bool = True
+
+
+class JobMatchScoreRequest(BaseModel):
+    target_role: str
+    candidate_title: str
+    candidate_description: str | None = None
+    candidate_location: str | None = None
+    candidate_skills: list[str] = []
+    user_skills: list[str] = []
+    user_location: str | None = None
+    user_experience_years: int | None = None
+    employment_type_pref: str | None = None
+
+
+class JobMatchScoreResponse(BaseModel):
+    match_score: float
+    is_match: bool
+    title_score: float
+    skills_score: float
+    location_score: float
+    experience_score: float
+    normalized_target_title: str
+    normalized_job_title: str
+    reasons: list[str] = []
+    breakdown: dict[str, Any] = {}
