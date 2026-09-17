@@ -110,4 +110,19 @@ describe('AutomationDashboard', () => {
     expect(screen.getByDisplayValue('London, UK')).toBeInTheDocument()
     expect(screen.getByDisplayValue('https://linkedin.com/in/ada')).toBeInTheDocument()
   })
+
+  it('navigates to Job Search tab and displays search configuration and candidates', async () => {
+    const client = userEvent.setup()
+    render(<AutomationDashboard />)
+
+    const searchTab = await screen.findByRole('button', { name: /job search/i })
+    expect(searchTab).toBeInTheDocument()
+    await client.click(searchTab)
+
+    expect(await screen.findByRole('heading', { name: /job search & multi-job discovery/i })).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/e\.g\. software developer/i)).toBeInTheDocument()
+    expect(screen.getByText(/min match score/i)).toBeInTheDocument()
+    expect(screen.getByText(/skip already applied postings/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /discover jobs/i })).toBeInTheDocument()
+  })
 })

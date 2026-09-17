@@ -1,5 +1,4 @@
-"""Automation router for CareerPilot V2."""
-
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import List, Optional
@@ -17,6 +16,7 @@ from ..automation.matcher import (
     JobMatchScorer,
     SelectedJobIdentity,
     extract_requisition_id_from_url_or_text,
+    is_duplicate_candidate,
 )
 from ..automation.scenarios.memory import ScenarioMemoryService
 from ..automation.state_machine import ApplicationStateMachine, AutomationState
@@ -28,7 +28,10 @@ from ..models import (
     AutomationScenario,
     AutomationSetting,
     CandidateProfile,
+    DiscoveredJob,
     Job,
+    JobSearchConfig,
+    Resume,
     User,
 )
 from ..schemas import (
@@ -44,8 +47,13 @@ from ..schemas import (
     AutomationTriggerRequest,
     CandidateProfileResponse,
     CandidateProfileUpdate,
+    DiscoveredJobResponse,
+    JobDiscoveryResultResponse,
+    JobDiscoveryTriggerRequest,
     JobMatchScoreRequest,
     JobMatchScoreResponse,
+    JobSearchConfigRequest,
+    JobSearchConfigResponse,
     SelectedJobIdentitySchema,
 )
 
@@ -159,6 +167,7 @@ def calculate_job_match_score(
         normalized_job_title=result.normalized_job_title,
         reasons=result.reasons,
         breakdown=result.breakdown,
+        score_breakdown=result.breakdown,
     )
 
 
@@ -167,14 +176,12 @@ def list_automation_runs(
     status_filter: Optional[str] = Query(default=None, alias="status"),
     current_user: User = Depends(get_current_user),
     database: Session = Depends(get_db),
-) -> List[AutomationRun]:
 ) -> List[AutomationRunResponse]:
     """List automation runs owned by current user."""
     query = select(AutomationRun).where(AutomationRun.user_id == current_user.id)
     if status_filter:
         query = query.where(AutomationRun.status == status_filter)
     query = query.order_by(AutomationRun.created_at.desc())
-    return list(database.scalars(query).all())
     runs = list(database.scalars(query).all())
     return [serialize_run_response(r, database) for r in runs]
 
@@ -234,8 +241,6 @@ async def trigger_automation_run(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     database: Session = Depends(get_db),
-) -> AutomationRun:
-    """Queue and start an automation run for a saved job or URL."""
 ) -> AutomationRunResponse:
     """Queue and start an automation run for a saved job or URL with persisted job identity."""
     job: Optional[Job] = None
@@ -304,7 +309,6 @@ async def trigger_automation_run(
     engine = PlaywrightAutomationEngine(headless=True)
     background_tasks.add_task(engine.execute_run, database, run.id)
 
-    return run
     return serialize_run_response(run, database)
 
 
@@ -564,3 +568,318 @@ def get_screenshot(
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Screenshot not found.")
     return FileResponse(file_path)
+
+
+# ============================================================================
+# Job Search & Multi-Job Discovery Endpoints (V2)
+# ============================================================================
+
+@router.get("/search/config", response_model=Optional[JobSearchConfigResponse])
+def get_job_search_config(
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+) -> Optional[JobSearchConfig]:
+    """Retrieve saved job search configuration for current user."""
+    return database.scalar(
+        select(JobSearchConfig).where(JobSearchConfig.user_id == current_user.id)
+    )
+
+
+@router.post("/search/config", response_model=JobSearchConfigResponse)
+def save_job_search_config(
+    payload: JobSearchConfigRequest,
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+) -> JobSearchConfig:
+    """Create or update job search configuration."""
+    config = database.scalar(
+        select(JobSearchConfig).where(JobSearchConfig.user_id == current_user.id)
+    )
+    if not config:
+        config = JobSearchConfig(user_id=current_user.id)
+        database.add(config)
+
+    for k, v in payload.model_dump().items():
+        setattr(config, k, v)
+
+    database.commit()
+    database.refresh(config)
+    return config
+
+
+@router.post("/search/discover", response_model=JobDiscoveryResultResponse)
+async def trigger_job_discovery(
+    payload: JobDiscoveryTriggerRequest,
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+) -> JobDiscoveryResultResponse:
+    """Discover, match, rank, and persist job candidates from a search URL."""
+    config = None
+    if payload.config_id:
+        config = database.get(JobSearchConfig, payload.config_id)
+    if not config:
+        config = database.scalar(
+            select(JobSearchConfig).where(JobSearchConfig.user_id == current_user.id)
+        )
+
+    search_url = (payload.search_url or (config.platform_search_url if config else "")).strip()
+    if not search_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a search_url or configure Job Search parameters first.",
+        )
+
+    max_results = payload.max_results or (config.max_jobs_to_discover if config else 10)
+    desired_title = config.desired_job_title if config else "Software Developer"
+    desired_location = config.desired_location if config else None
+    user_experience = config.years_of_experience if config else None
+    specific_company = config.specific_company if config else None
+    min_score = payload.min_match_score if getattr(payload, "min_match_score", None) is not None else (config.min_match_score if config and config.min_match_score is not None else 60.0)
+    skip_applied = payload.skip_already_applied if getattr(payload, "skip_already_applied", None) is not None else (config.skip_already_applied if config and config.skip_already_applied is not None else True)
+
+    # Load active resume skills
+    resume = None
+    if config and config.active_resume_id:
+        resume = database.get(Resume, config.active_resume_id)
+    if not resume:
+        resume = database.scalar(
+            select(Resume).where(Resume.user_id == current_user.id, Resume.is_active == True)
+        )
+
+    user_skills = []
+    if resume and resume.extracted_text:
+        common_tech = ["python", "javascript", "typescript", "react", "fastapi", "docker", "aws", "sql", "postgresql", "node", "java", "kubernetes", "git"]
+        for tech in common_tech:
+            if tech in resume.extracted_text.lower():
+                user_skills.append(tech.title())
+
+    # Find adapter for search_url
+    registry = get_adapter_registry()
+    adapter = registry.get_adapter_for_url(search_url)
+
+    # Scrape candidates using Playwright or adapter discovery
+    discovered_raw = []
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            discovered_raw = await adapter.discover_jobs_from_search(page, search_url, max_jobs=max_results)
+            try:
+                discovered_raw = await adapter.discover_jobs_from_search(page, search_url, max_jobs=max_results)
+            except PermissionError as barrier_err:
+                # Capture screenshot and register human intervention record
+                screenshot = None
+                try:
+                    from ..automation.engine import PlaywrightAutomationEngine
+                    engine = PlaywrightAutomationEngine()
+                    screenshot = await engine.capture_screenshot(page, current_user.id, "discovery_barrier")
+                except Exception:
+                    pass
+
+                barrier_run = AutomationRun(
+                    user_id=current_user.id,
+                    company=config.specific_company if config and config.specific_company else "Search Platform",
+                    job_title=f"Discovery Barrier: {desired_title}",
+                    job_url=search_url,
+                    current_url=search_url,
+                    screenshot_path=screenshot,
+                    status=AutomationState.WAITING_FOR_USER.value,
+                    current_step="Security Barrier",
+                    requires_user_action=True,
+                    user_prompt=f"Access barrier encountered during job discovery: {barrier_err}. Please resolve the security check.",
+                    user_prompt_context_json=json.dumps({
+                        "reason": str(barrier_err),
+                        "search_url": search_url,
+                        "step": "Security Barrier",
+                        "screenshot_path": screenshot,
+                    }),
+                )
+                database.add(barrier_run)
+                database.commit()
+                await browser.close()
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Security barrier encountered on job search portal: {barrier_err}. Human intervention required.",
+                )
+            await browser.close()
+    except HTTPException:
+        raise
+    except Exception:
+        discovered_raw = adapter.discover_jobs(query=desired_title, location=desired_location or "")
+
+    # Load existing discovered jobs for deduplication
+    # Load existing discovered jobs and applications for deduplication
+    existing_jobs = list(
+        database.scalars(select(DiscoveredJob).where(DiscoveredJob.user_id == current_user.id)).all()
+    )
+    already_applied_targets = []
+    if skip_applied:
+        applied_jobs = list(
+            database.scalars(
+                select(DiscoveredJob).where(
+                    DiscoveredJob.user_id == current_user.id,
+                    DiscoveredJob.status.in_(["APPLIED", "APPLYING", "QUEUED"])
+                )
+            ).all()
+        )
+        applied_apps = list(
+            database.scalars(
+                select(Application).where(Application.user_id == current_user.id)
+            ).all()
+        )
+        already_applied_targets = applied_jobs + applied_apps
+
+    scorer = JobMatchScorer(match_threshold=min_score)
+    new_saved_jobs = []
+    total_matched = 0
+
+    for cand in discovered_raw:
+        if is_duplicate_candidate(
+            candidate_url=cand.url,
+            candidate_title=cand.title,
+            candidate_company=cand.company,
+            existing_records=existing_jobs,
+            candidate_requisition_id=cand.requisition_id,
+            candidate_location=cand.location,
+            already_applied_records=already_applied_targets if skip_applied else None,
+        ):
+            continue
+
+        score_res = scorer.score_job(
+            target_role=desired_title,
+            candidate_title=cand.title,
+            candidate_description=cand.description,
+            candidate_location=cand.location,
+            candidate_skills=cand.skills,
+            user_skills=user_skills,
+            user_location=desired_location,
+            user_experience_years=user_experience,
+            candidate_company=cand.company,
+            specific_company=specific_company,
+            candidate_experience_str=cand.experience_str,
+        )
+
+        if score_res.is_match:
+            total_matched += 1
+
+        db_job = DiscoveredJob(
+            user_id=current_user.id,
+            config_id=config.id if config else None,
+            company=cand.company,
+            exact_title=cand.title,
+            job_url=cand.url,
+            location=cand.location,
+            platform=cand.platform,
+            raw_description=cand.description,
+            requisition_id=cand.requisition_id,
+            experience_raw=cand.experience_str,
+            matched_skills_json=json.dumps(score_res.matched_skills),
+            missing_skills_json=json.dumps(score_res.missing_skills),
+            match_score=score_res.match_score,
+            title_score=score_res.title_score,
+            skills_score=score_res.skills_score,
+            location_score=score_res.location_score,
+            experience_score=score_res.experience_score,
+            is_matched=score_res.is_match,
+            match_reasons_json=json.dumps(score_res.reasons),
+            match_breakdown_json=json.dumps(score_res.breakdown),
+            status="MATCHED" if score_res.is_match else "REJECTED",
+        )
+        database.add(db_job)
+        existing_jobs.append(db_job)
+        new_saved_jobs.append(db_job)
+
+    if config:
+        config.last_searched_at = datetime.now(timezone.utc)
+
+    database.commit()
+    for j in new_saved_jobs:
+        database.refresh(j)
+
+    return JobDiscoveryResultResponse(
+        total_discovered=len(discovered_raw),
+        total_matched=total_matched,
+        new_candidates_saved=len(new_saved_jobs),
+        jobs=[DiscoveredJobResponse.model_validate(j) for j in new_saved_jobs],
+    )
+
+
+@router.get("/search/jobs", response_model=List[DiscoveredJobResponse])
+def list_discovered_jobs(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+) -> List[DiscoveredJobResponse]:
+    """List discovered job postings with filtering and match scores."""
+    query = select(DiscoveredJob).where(DiscoveredJob.user_id == current_user.id)
+    if status_filter:
+        query = query.where(DiscoveredJob.status == status_filter)
+    query = query.order_by(DiscoveredJob.match_score.desc(), DiscoveredJob.discovered_at.desc())
+    jobs = list(database.scalars(query).all())
+    return [DiscoveredJobResponse.model_validate(j) for j in jobs]
+
+
+@router.post("/search/jobs/{job_id}/queue", response_model=DiscoveredJobResponse)
+def queue_discovered_job(
+    job_id: UUID,
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+) -> DiscoveredJobResponse:
+    """Move a discovered candidate into the application queue."""
+    job = database.get(DiscoveredJob, job_id)
+    if not job or job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Discovered job not found.")
+
+    job.status = "QUEUED"
+    database.commit()
+    database.refresh(job)
+    return DiscoveredJobResponse.model_validate(job)
+
+
+@router.post("/search/jobs/{job_id}/apply", response_model=AutomationRunResponse)
+async def apply_discovered_job(
+    job_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+) -> AutomationRunResponse:
+    """Trigger application automation for a specific discovered job candidate."""
+    discovered = database.get(DiscoveredJob, job_id)
+    if not discovered or discovered.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Discovered job not found.")
+
+    discovered.status = "APPLYING"
+
+    exact_identity = SelectedJobIdentity(
+        company=discovered.company,
+        exact_title=discovered.exact_title,
+        job_url=discovered.job_url,
+        requisition_id=discovered.requisition_id or extract_requisition_id_from_url_or_text(discovered.job_url),
+        location=discovered.location,
+        source=discovered.platform or "discovery",
+    )
+
+    run = AutomationRun(
+        user_id=current_user.id,
+        company=discovered.company,
+        job_title=discovered.exact_title,
+        job_url=discovered.job_url,
+        current_url=discovered.job_url,
+        status=AutomationState.JOB_SELECTED.value,
+        current_step="Discovery Job Selected",
+        user_prompt_context_json=json.dumps({
+            "selected_job_identity": exact_identity.to_dict()
+        }),
+    )
+    database.add(run)
+    database.flush()
+
+    discovered.automation_run_id = run.id
+    database.commit()
+    database.refresh(run)
+
+    engine = PlaywrightAutomationEngine(headless=True)
+    background_tasks.add_task(engine.execute_run, database, run.id)
+
+    return serialize_run_response(run, database)

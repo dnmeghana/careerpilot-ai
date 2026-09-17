@@ -200,6 +200,295 @@ class JobTitleNormalizer:
         )
 
 
+# Geographic location clusters for fuzzy/regional compatibility
+LOCATION_CLUSTERS: Dict[str, Set[str]] = {
+    "new york": {"new york", "nyc", "ny", "manhattan", "brooklyn", "queens", "new york city"},
+    "san francisco": {"san francisco", "sf", "bay area", "ca", "california", "san jose", "silicon valley", "oakland", "palo alto", "mountain view", "sunnyvale"},
+    "seattle": {"seattle", "wa", "washington", "bellevue", "redmond"},
+    "boston": {"boston", "ma", "massachusetts", "cambridge"},
+    "austin": {"austin", "tx", "texas"},
+    "chicago": {"chicago", "il", "illinois"},
+    "los angeles": {"los angeles", "la", "ca", "california", "santa monica"},
+    "bangalore": {"bangalore", "bengaluru", "blr", "karnataka", "india", "in"},
+    "hyderabad": {"hyderabad", "telangana", "india", "in"},
+    "pune": {"pune", "maharashtra", "india", "in"},
+    "delhi": {"delhi", "noida", "gurugram", "gurgaon", "ncr", "india", "in"},
+    "london": {"london", "uk", "united kingdom", "england"},
+    "toronto": {"toronto", "on", "ontario", "canada"},
+}
+
+
+def calculate_location_compatibility(
+    desired_location: Optional[str], candidate_location: Optional[str]
+) -> tuple[float, List[str]]:
+    """Evaluates location match considering aliases, regions, and remote options."""
+    reasons: List[str] = []
+    if not desired_location:
+        return 80.0, ["Target location not specified (flexible)."]
+    if not candidate_location:
+        return 75.0, ["Job location unspecified in posting."]
+
+    d_clean = desired_location.lower().strip()
+    c_clean = candidate_location.lower().strip()
+
+    # Remote check
+    if any(k in d_clean or k in c_clean for k in ("remote", "anywhere", "work from home", "wfh", "virtual")):
+        reasons.append("Remote location compatibility.")
+        return 100.0, reasons
+
+    # Direct substring match
+    if d_clean in c_clean or c_clean in d_clean:
+        reasons.append(f"Location matches directly: '{candidate_location}'.")
+        return 100.0, reasons
+
+    # Cluster matching
+    d_cluster = None
+    for cluster_name, aliases in LOCATION_CLUSTERS.items():
+        if any(re.search(rf"\b{re.escape(alias)}\b", d_clean) for alias in aliases):
+            d_cluster = cluster_name
+            break
+
+    c_cluster = None
+    for cluster_name, aliases in LOCATION_CLUSTERS.items():
+        if any(re.search(rf"\b{re.escape(alias)}\b", c_clean) for alias in aliases):
+            c_cluster = cluster_name
+            break
+
+    if d_cluster and c_cluster and d_cluster == c_cluster:
+        reasons.append(f"Location matches geographic area ({d_cluster.title()}).")
+        return 95.0, reasons
+
+    # Token overlap
+    d_tokens = set(re.findall(r"\b[a-z]{2,}\b", d_clean))
+    c_tokens = set(re.findall(r"\b[a-z]{2,}\b", c_clean))
+    overlap = d_tokens.intersection(c_tokens)
+    if overlap:
+        reasons.append(f"Partial geographic overlap ({', '.join(overlap)}).")
+        return 70.0, reasons
+
+    reasons.append(f"Location divergence: user desires '{desired_location}' but job is in '{candidate_location}'.")
+    return 30.0, reasons
+
+
+def parse_experience_range(exp_text: Optional[str]) -> tuple[Optional[float], Optional[float]]:
+    """Extract minimum and maximum years of experience from arbitrary text."""
+    if not exp_text:
+        return None, None
+    text = exp_text.lower()
+    m_range = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*(?:yrs|years|yr)?", text)
+    if m_range:
+        return float(m_range.group(1)), float(m_range.group(2))
+    m_min = re.search(r"(?:minimum|min|at least|\+)?\s*(\d+(?:\.\d+)?)\s*(?:\+|plus)?\s*(?:yrs|years|yr)", text)
+    if m_min:
+        val = float(m_min.group(1))
+        return val, val + 3.0
+    m_digit = re.search(r"(\d+(?:\.\d+)?)\s*(?:yrs|years|yr)", text)
+    if m_digit:
+        val = float(m_digit.group(1))
+        return val, val + 2.0
+    return None, None
+
+
+def calculate_experience_compatibility(
+    user_years: Optional[int | float],
+    job_exp_str: Optional[str] = None,
+    candidate_description: Optional[str] = None,
+    candidate_seniority_rank: Optional[int] = None,
+) -> tuple[float, List[str]]:
+    """Score experience compatibility against requirements or seniority tiers."""
+    reasons: List[str] = []
+    if user_years is None:
+        return 80.0, ["User experience years not configured (flexible)."]
+
+    min_exp, max_exp = parse_experience_range(job_exp_str)
+    if min_exp is None and candidate_description:
+        min_exp, max_exp = parse_experience_range(candidate_description)
+
+    if min_exp is not None and max_exp is not None:
+        if min_exp <= user_years <= max_exp:
+            reasons.append(f"Experience within required range ({min_exp:.0f}-{max_exp:.0f} yrs for {user_years:.0f} yrs).")
+            return 100.0, reasons
+        elif user_years < min_exp:
+            gap = min_exp - user_years
+            if gap <= 1.0:
+                reasons.append(f"Slightly below target experience ({user_years:.0f} yrs vs {min_exp:.0f}-{max_exp:.0f} yrs).")
+                return 80.0, reasons
+            elif gap <= 2.5:
+                reasons.append(f"Moderate experience gap ({user_years:.0f} yrs vs {min_exp:.0f}-{max_exp:.0f} yrs).")
+                return 55.0, reasons
+            else:
+                reasons.append(f"Significant experience deficit ({user_years:.0f} yrs vs min {min_exp:.0f} yrs).")
+                return 30.0, reasons
+        else:
+            over = user_years - max_exp
+            if over <= 2.0:
+                reasons.append(f"Slightly senior for posting ({user_years:.0f} yrs vs max {max_exp:.0f} yrs).")
+                return 90.0, reasons
+            elif over <= 4.0:
+                reasons.append(f"Noticeably overqualified for range ({user_years:.0f} yrs vs max {max_exp:.0f} yrs).")
+                return 70.0, reasons
+            else:
+                reasons.append(f"Substantially overqualified for posting ({user_years:.0f} yrs vs max {max_exp:.0f} yrs).")
+                return 50.0, reasons
+
+    if candidate_seniority_rank is not None:
+        expected_years = {1: 0, 2: 1, 3: 3, 4: 5, 5: 8, 6: 10, 7: 12}.get(candidate_seniority_rank, 3)
+        diff = abs(user_years - expected_years)
+        if diff <= 1:
+            reasons.append(f"Experience aligns with seniority tier (~{expected_years} yrs).")
+            return 100.0, reasons
+        elif diff <= 3:
+            reasons.append(f"Acceptable seniority variance (~{expected_years} yrs expected).")
+            return 80.0, reasons
+        else:
+            reasons.append(f"Noticeable seniority variance (~{expected_years} yrs expected vs {user_years:.0f} yrs).")
+            return 50.0, reasons
+
+    return 80.0, ["Posting does not specify strict experience requirements."]
+
+
+def check_company_match(
+    specific_company: Optional[str], candidate_company: str
+) -> tuple[bool, float, List[str]]:
+    """Verify company match when user specifies a specific company requirement."""
+    reasons: List[str] = []
+    if not specific_company or not specific_company.strip():
+        return True, 100.0, []
+
+    s_clean = specific_company.lower().strip()
+    c_clean = candidate_company.lower().strip()
+
+    if s_clean in c_clean or c_clean in s_clean:
+        reasons.append(f"Company matches configured target '{specific_company}'.")
+        return True, 100.0, reasons
+
+    reasons.append(f"Company '{candidate_company}' does not match requested company '{specific_company}'.")
+    return False, 0.0, reasons
+
+
+class SkillMatchTuple(tuple):
+    """Tuple subclass allowing both 2-element unpacking (score, reasons) and attribute access."""
+    def __new__(cls, score: float, reasons: List[str], matched_skills: List[str], missing_skills: List[str]):
+        return super().__new__(cls, (score, reasons))
+
+    def __init__(self, score: float, reasons: List[str], matched_skills: List[str], missing_skills: List[str]):
+        self.score = score
+        self.reasons = reasons
+        self.matched_skills = matched_skills
+        self.missing_skills = missing_skills
+
+
+def match_resume_skills(
+    user_skills: Optional[List[str]],
+    candidate_skills: Optional[List[str]],
+    candidate_description: Optional[str] = None,
+) -> SkillMatchTuple:
+    """Calculate skill overlap percentage, missing skills, and collect reasoning."""
+    reasons: List[str] = []
+    if not user_skills:
+        return SkillMatchTuple(70.0, ["No resume skills provided for skill matching."], [], [])
+
+    cand_skills_set = {s.lower().strip() for s in (candidate_skills or []) if s and s.strip()}
+    if candidate_description:
+        desc_lower = candidate_description.lower()
+        for u_skill in user_skills:
+            if re.search(rf"\b{re.escape(u_skill.lower())}\b", desc_lower):
+                cand_skills_set.add(u_skill.lower().strip())
+        tech_vocab = [
+            "python", "javascript", "typescript", "react", "fastapi", "docker", "aws",
+            "sql", "postgresql", "node", "node.js", "java", "kubernetes", "git", "c++",
+            "golang", "go", "ruby", "rails", "django", "flask", "gcp", "azure", "graphql",
+            "redis", "mongodb", "kafka", "ci/cd", "terraform", "linux", "html", "css"
+        ]
+        for tech in tech_vocab:
+            if re.search(rf"\b{re.escape(tech)}\b", desc_lower):
+                cand_skills_set.add(tech)
+
+    user_skills_set = {s.lower().strip() for s in user_skills if s and s.strip()}
+    matched = user_skills_set.intersection(cand_skills_set)
+    missing = cand_skills_set.difference(user_skills_set)
+
+    matched_list = [s.title() for s in sorted(matched)]
+    missing_list = [s.title() for s in sorted(missing)]
+
+    if not cand_skills_set:
+        return SkillMatchTuple(70.0, ["No specific skills extracted from job posting."], [], [])
+
+    ratio = len(matched) / len(user_skills_set) if user_skills_set else 0.0
+    score = round(ratio * 100.0, 1)
+    if matched_list:
+        reasons.append(f"Skills matched ({len(matched_list)}/{len(user_skills_set)}): {', '.join(matched_list[:6])}.")
+    else:
+        reasons.append("No overlap between resume skills and job requirements.")
+
+    if missing_list:
+        reasons.append(f"Missing skills: {', '.join(missing_list[:4])}.")
+
+    return SkillMatchTuple(score, reasons, matched_list, missing_list)
+
+
+def normalize_job_url_for_dedup(url: str) -> str:
+    """Strip query tracking parameters for deduplication comparison."""
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    clean_query = [(k, v) for k, v in parse_qsl(parsed.query) if not k.lower().startswith("utm_") and k.lower() not in ("ref", "source", "tracking")]
+    return urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path.rstrip("/"), "", urlencode(clean_query), "")).strip()
+
+
+def is_duplicate_candidate(
+    candidate_url: str,
+    candidate_title: str,
+    candidate_company: str,
+    existing_records: List[Any],
+    candidate_requisition_id: Optional[str] = None,
+    candidate_location: Optional[str] = None,
+    already_applied_records: Optional[List[Any]] = None,
+) -> bool:
+    """Return True if candidate is already present in database records or already applied."""
+    c_norm_url = normalize_job_url_for_dedup(candidate_url)
+    c_title = JobTitleNormalizer.clean_text(candidate_title)
+    c_company = candidate_company.lower().strip()
+    c_req_id = (candidate_requisition_id or extract_requisition_id_from_url_or_text(candidate_url) or "").strip().lower()
+
+    # Check already-applied records first
+    all_targets = list(existing_records)
+    if already_applied_records:
+        all_targets.extend(already_applied_records)
+
+    for rec in all_targets:
+        rec_url = getattr(rec, "job_url", getattr(rec, "url", "")) or ""
+        rec_title = getattr(rec, "exact_title", getattr(rec, "title", "")) or ""
+        rec_company = (getattr(rec, "company", "") or "").lower().strip()
+        rec_location = getattr(rec, "location", None)
+        rec_req_id = (getattr(rec, "requisition_id", None) or extract_requisition_id_from_url_or_text(rec_url) or "").strip().lower()
+
+        # 1. Requisition ID check: If both have requisition IDs, same requisition ID + same company = duplicate
+        if c_req_id and rec_req_id:
+            if c_req_id == rec_req_id and (not c_company or not rec_company or c_company == rec_company):
+                return True
+            # If both have different requisition IDs, they are distinct positions (not duplicates)
+            if c_req_id != rec_req_id and c_company == rec_company and c_title == JobTitleNormalizer.clean_text(rec_title):
+                continue
+
+        # 2. Canonical URL check
+        if c_norm_url and normalize_job_url_for_dedup(rec_url) == c_norm_url:
+            return True
+
+        # 3. Company + Title + Location check
+        if c_company and c_company == rec_company:
+            if JobTitleNormalizer.clean_text(rec_title) == c_title:
+                # If locations are provided and completely in different clusters, allow distinct positions
+                if candidate_location and rec_location:
+                    loc_score, _ = calculate_location_compatibility(candidate_location, rec_location)
+                    if loc_score < 50.0:
+                        continue
+                return True
+
+    return False
+
+
 @dataclass
 class JobMatchResult:
     match_score: float  # 0.0 to 100.0
@@ -212,6 +501,8 @@ class JobMatchResult:
     normalized_job_title: str
     reasons: List[str] = field(default_factory=list)
     breakdown: Dict[str, Any] = field(default_factory=dict)
+    matched_skills: List[str] = field(default_factory=list)
+    missing_skills: List[str] = field(default_factory=list)
 
 
 class JobMatchScorer:
@@ -246,7 +537,10 @@ class JobMatchScorer:
                 break
 
         base_score = 0.0
-        if is_synonymous_family:
+        if target_p.core_role and target_p.core_role == cand_p.core_role:
+            base_score = 100.0
+            reasons.append(f"Core role matches canonical title ('{target_p.core_role}').")
+        elif is_synonymous_family:
             base_score = 90.0
             reasons.append(f"Core role matches known synonym family ('{target_p.core_role}' ~= '{cand_p.core_role}').")
         else:
@@ -308,77 +602,69 @@ class JobMatchScorer:
         candidate_skills: Optional[List[str]] = None,
         user_skills: Optional[List[str]] = None,
         user_location: Optional[str] = None,
-        user_experience_years: Optional[int] = None,
+        user_experience_years: Optional[int | float] = None,
         employment_type_pref: Optional[str] = None,
+        candidate_company: Optional[str] = None,
+        specific_company: Optional[str] = None,
+        candidate_experience_str: Optional[str] = None,
     ) -> JobMatchResult:
-        """Computes comprehensive multi-factor match score."""
+        """Computes comprehensive multi-factor match score with transparent breakdown."""
         target_p = JobTitleNormalizer.parse(target_role)
         cand_p = JobTitleNormalizer.parse(candidate_title)
 
-        title_score, reasons = self.calculate_title_similarity(target_role, candidate_title)
+        # 1. Title Similarity (Weight: 40%)
+        title_score, title_reasons = self.calculate_title_similarity(target_role, candidate_title)
+        reasons = list(title_reasons)
 
-        # 2. Skills Match (Weight: 20%)
-        skills_score = 70.0  # Default baseline if skills not specified
-        if user_skills and (candidate_skills or candidate_description):
-            cand_skills_set = {s.lower() for s in (candidate_skills or [])}
-            if candidate_description:
-                for u_skill in user_skills:
-                    if re.search(rf"\b{re.escape(u_skill.lower())}\b", candidate_description.lower()):
-                        cand_skills_set.add(u_skill.lower())
-            user_skills_set = {s.lower() for s in user_skills}
-            if user_skills_set:
-                matched_skills = user_skills_set.intersection(cand_skills_set)
-                skills_score = round((len(matched_skills) / len(user_skills_set)) * 100.0, 1)
-                if matched_skills:
-                    reasons.append(f"Skills matched ({len(matched_skills)}/{len(user_skills_set)}): {', '.join(sorted(matched_skills)[:5])}.")
+        # 2. Skills Match (Weight: 25%)
+        skills_score, skill_reasons = match_resume_skills(user_skills, candidate_skills, candidate_description)
+        reasons.extend(skill_reasons)
+        skills_res = match_resume_skills(user_skills, candidate_skills, candidate_description)
+        skills_score = skills_res.score
+        reasons.extend(skills_res.reasons)
 
-        # 3. Location Match (Weight: 15%)
-        location_score = 80.0  # Default neutral/good
-        if user_location and candidate_location:
-            u_loc = user_location.lower().strip()
-            c_loc = candidate_location.lower().strip()
-            if "remote" in c_loc or "remote" in u_loc:
-                location_score = 100.0
-                reasons.append("Remote location compatibility.")
-            elif u_loc in c_loc or c_loc in u_loc:
-                location_score = 100.0
-                reasons.append(f"Matching location: {candidate_location}.")
-            else:
-                location_score = 40.0
-                reasons.append(f"Location difference: User '{user_location}' vs Job '{candidate_location}'.")
+        # 3. Experience Match (Weight: 20%)
+        exp_score, exp_reasons = calculate_experience_compatibility(
+            user_years=user_experience_years,
+            job_exp_str=candidate_experience_str,
+            candidate_description=candidate_description,
+            candidate_seniority_rank=cand_p.seniority_rank,
+        )
+        reasons.extend(exp_reasons)
 
-        # 4. Experience / Seniority (Weight: 10%)
-        experience_score = 80.0
-        if user_experience_years is not None and cand_p.seniority_rank is not None:
-            # Junior: 0-2 years, Mid: 2-5 years, Senior: 5-8 years, Staff+: 8+ years
-            expected_years = {
-                1: 0, 2: 1, 3: 3, 4: 5, 5: 8, 6: 10, 7: 12
-            }.get(cand_p.seniority_rank, 3)
-            diff = abs(user_experience_years - expected_years)
-            if diff <= 2:
-                experience_score = 100.0
-            elif diff <= 4:
-                experience_score = 75.0
-            else:
-                experience_score = 45.0
+        # 4. Location Match (Weight: 15%)
+        loc_score, loc_reasons = calculate_location_compatibility(user_location, candidate_location)
+        reasons.extend(loc_reasons)
 
-        # Weighted Total Score:
-        # Title: 50%, Skills: 20%, Location: 15%, Experience: 15%
+        # 5. Company Matching (Strict or Soft)
+        company_matched = True
+        if specific_company and candidate_company:
+            comp_ok, comp_score, comp_reasons = check_company_match(specific_company, candidate_company)
+            reasons.extend(comp_reasons)
+            if not comp_ok:
+                company_matched = False
+
+        # Weighted Total Score: Title (40%), Skills (25%), Experience (20%), Location (15%)
         weighted_score = (
-            (title_score * 0.50) +
-            (skills_score * 0.20) +
-            (location_score * 0.15) +
-            (experience_score * 0.15)
+            (title_score * 0.40) +
+            (skills_score * 0.25) +
+            (exp_score * 0.20) +
+            (loc_score * 0.15)
         )
         final_score = round(max(0.0, min(100.0, weighted_score)), 1)
+
         is_match = final_score >= self.match_threshold and title_score >= 40.0
+        if not company_matched:
+            is_match = False
+            final_score = min(final_score, 30.0)
 
         breakdown = {
             "title_score": title_score,
             "skills_score": skills_score,
-            "location_score": location_score,
-            "experience_score": experience_score,
+            "location_score": loc_score,
+            "experience_score": exp_score,
             "weighted_score": final_score,
+            "company_matched": company_matched,
         }
 
         return JobMatchResult(
@@ -386,12 +672,14 @@ class JobMatchScorer:
             is_match=is_match,
             title_score=title_score,
             skills_score=skills_score,
-            location_score=location_score,
-            experience_score=experience_score,
+            location_score=loc_score,
+            experience_score=exp_score,
             normalized_target_title=target_p.normalized,
             normalized_job_title=cand_p.normalized,
             reasons=reasons,
             breakdown=breakdown,
+            matched_skills=skills_res.matched_skills,
+            missing_skills=skills_res.missing_skills,
         )
 
 

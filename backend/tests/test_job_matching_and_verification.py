@@ -296,11 +296,10 @@ async def test_9_playwright_selected_job_vs_page_mismatch_pauses_for_user(mismat
     db_session.flush()
 
     profile = CandidateProfile(
-        id=uuid4(),
-        user_id=user.id,
-        phone="555-0199",
-        location="New York, NY",
-        target_role="Software Developer - Backend",
+    id=uuid4(),
+    user_id=user.id,
+    phone="555-0199",
+    location="New York, NY",
     )
     db_session.add(profile)
 
@@ -308,15 +307,15 @@ async def test_9_playwright_selected_job_vs_page_mismatch_pauses_for_user(mismat
         id=uuid4(),
         user_id=user.id,
         filename="resume.pdf",
-        parsed_skills=["Python", "FastAPI"],
-        is_primary=True,
+        file_path="/tmp/resume.pdf",
+        extracted_text="Python, FastAPI, Docker",
+        is_active=True,
     )
     db_session.add(resume)
 
     settings = AutomationSetting(
-        user_id=user.id,
-        human_in_loop_mode="ALWAYS",
-        auto_submit=False,
+    user_id=user.id,
+    auto_submit=False,
     )
     db_session.add(settings)
 
@@ -350,7 +349,7 @@ async def test_9_playwright_selected_job_vs_page_mismatch_pauses_for_user(mismat
         screenshots_dir="/tmp/careerpilot_test_screenshots",
     )
 
-    result_run = await engine.execute_run(run.id, db_session)
+    result_run = await engine.execute_run(db_session, run.id)
 
     # Verify that the run halted at Job Identity Verification Mismatch
     assert result_run.status == AutomationState.WAITING_FOR_USER.value

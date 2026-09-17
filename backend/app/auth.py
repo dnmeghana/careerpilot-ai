@@ -24,11 +24,17 @@ def verify_password(password: str, hashed_password: str) -> bool:
     return password_hash.verify(password, hashed_password)
 
 
-def create_access_token(user_id: UUID) -> str:
+def create_access_token(user_id: UUID, token_version: int = 1) -> str:
     settings = get_settings()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.access_token_expire_minutes
+    )
     return jwt.encode(
-        {"sub": str(user_id), "exp": expires_at},
+        {
+            "sub": str(user_id),
+            "token_version": token_version,
+            "exp": expires_at,
+        },
         settings.jwt_secret_key,
         algorithm=settings.jwt_algorithm,
     )
@@ -59,4 +65,9 @@ def get_current_user(
     user = database.scalar(select(User).where(User.id == user_id))
     if user is None:
         raise credentials_exception
+
+    token_version = payload.get("token_version")
+    if token_version is not None and token_version != user.token_version:
+        raise credentials_exception
+
     return user

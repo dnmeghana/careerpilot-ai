@@ -13,16 +13,26 @@ import {
   deleteAutomationScenario,
   getAutomationSettings,
   updateAutomationSettings,
+  getJobSearchConfig,
+  saveJobSearchConfig,
+  triggerJobDiscovery,
+  getDiscoveredJobs,
+  queueDiscoveredJob,
+  applyDiscoveredJob,
+  getResumes,
   api,
   type AutomationRun,
   type AutomationScenario,
   type AutomationSetting,
   type CandidateProfile,
   type Job,
+  type JobSearchConfig,
+  type DiscoveredJob,
+  type Resume,
 } from '../lib/api'
 import { Icon } from './Icon'
 
-type TabType = 'runs' | 'interventions' | 'memory' | 'settings'
+type TabType = 'runs' | 'search' | 'interventions' | 'memory' | 'settings'
 
 export function AutomationDashboard() {
   const [activeTab, setActiveTab] = useState<TabType>('runs')
@@ -31,6 +41,26 @@ export function AutomationDashboard() {
   const [profile, setProfile] = useState<CandidateProfile | null>(null)
   const [settings, setSettings] = useState<AutomationSetting | null>(null)
   const [savedJobs, setSavedJobs] = useState<Job[]>([])
+
+  // Job Search & Discovery State
+  const [searchConfig, setSearchConfig] = useState<JobSearchConfig | null>(null)
+  const [discoveredJobs, setDiscoveredJobs] = useState<DiscoveredJob[]>([])
+  const [resumes, setResumes] = useState<Resume[]>([])
+  const [desiredJobTitle, setDesiredJobTitle] = useState('')
+  const [desiredLocation, setDesiredLocation] = useState('')
+  const [yearsOfExp, setYearsOfExp] = useState<number>(3)
+  const [platformSearchUrl, setPlatformSearchUrl] = useState('')
+  const [specificCompany, setSpecificCompany] = useState('')
+  const [selectedResumeId, setSelectedResumeId] = useState('')
+  const [maxJobs, setMaxJobs] = useState<number>(10)
+  const [minMatchScore, setMinMatchScore] = useState<number>(60)
+  const [skipAlreadyApplied, setSkipAlreadyApplied] = useState<boolean>(true)
+  const [scheduleInterval, setScheduleInterval] = useState<string>('manual')
+  const [savingConfig, setSavingConfig] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
+  const [discoveryFilter, setDiscoveryFilter] = useState<string>('all')
+  const [jobActionLoading, setJobActionLoading] = useState<Record<string, boolean>>({})
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -60,22 +90,148 @@ export function AutomationDashboard() {
     setLoading(true)
     setError('')
     try {
-      const [runsData, scenariosData, profileData, settingsData, jobsResponse] = await Promise.all([
+      const [runsData, scenariosData, profileData, settingsData, jobsResponse, searchCfg, discJobs, resumesData] = await Promise.all([
         getAutomationRuns(),
         getAutomationScenarios(),
         getCandidateProfile(),
         getAutomationSettings(),
         api.get<Job[]>('/jobs'),
+        getJobSearchConfig().catch(() => null),
+        getDiscoveredJobs().catch(() => []),
+        getResumes().catch(() => []),
       ])
       setRuns(runsData)
       setScenarios(scenariosData)
       setProfile(profileData)
       setSettings(settingsData)
       setSavedJobs(jobsResponse.data)
+      setSearchConfig(searchCfg)
+      setDiscoveredJobs(discJobs)
+      setResumes(resumesData)
+
+      if (searchCfg) {
+        setDesiredJobTitle(searchCfg.desired_job_title || '')
+        setDesiredLocation(searchCfg.desired_location || '')
+        setYearsOfExp(searchCfg.years_of_experience ?? 3)
+        setPlatformSearchUrl(searchCfg.platform_search_url || '')
+        setSpecificCompany(searchCfg.specific_company || '')
+        setSelectedResumeId(searchCfg.active_resume_id || '')
+        setMaxJobs(searchCfg.max_jobs_to_discover ?? 10)
+        setMinMatchScore(searchCfg.min_match_score ?? 60)
+        setSkipAlreadyApplied(searchCfg.skip_already_applied ?? true)
+        setScheduleInterval(searchCfg.schedule_interval || 'manual')
+      } else if (resumesData.length > 0) {
+        const active = resumesData.find((r) => r.is_active) || resumesData[0]
+        setSelectedResumeId(active.id)
+      }
     } catch {
       setError('Could not load automation data. Ensure backend is running.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  function handleCopyUrl(url: string) {
+    navigator.clipboard.writeText(url)
+    setCopiedUrl(url)
+    setTimeout(() => setCopiedUrl(null), 2500)
+  }
+
+  async function handleSaveSearchConfig(e?: FormEvent) {
+    if (e) e.preventDefault()
+    setSavingConfig(true)
+    setError('')
+    try {
+      const saved = await saveJobSearchConfig({
+        desired_job_title: desiredJobTitle,
+        desired_location: desiredLocation,
+        years_of_experience: Number(yearsOfExp),
+        platform_search_url: platformSearchUrl,
+        specific_company: specificCompany || undefined,
+        active_resume_id: selectedResumeId || undefined,
+        max_jobs_to_discover: Number(maxJobs),
+        min_match_score: Number(minMatchScore),
+        skip_already_applied: Boolean(skipAlreadyApplied),
+        schedule_interval: scheduleInterval,
+      })
+      setSearchConfig(saved)
+      setSuccessMsg('Job search configuration saved successfully.')
+      setTimeout(() => setSuccessMsg(''), 4000)
+    } catch {
+      setError('Failed to save job search configuration.')
+    } finally {
+      setSavingConfig(false)
+    }
+  }
+
+  async function handleTriggerDiscovery() {
+    if (!desiredJobTitle || !desiredLocation || !platformSearchUrl) {
+      setError('Please provide Desired Job Title, Location, and Platform Search URL.')
+      return
+    }
+    setDiscovering(true)
+    setError('')
+    try {
+      const cfg = await saveJobSearchConfig({
+        desired_job_title: desiredJobTitle,
+        desired_location: desiredLocation,
+        years_of_experience: Number(yearsOfExp),
+        platform_search_url: platformSearchUrl,
+        specific_company: specificCompany || undefined,
+        active_resume_id: selectedResumeId || undefined,
+        max_jobs_to_discover: Number(maxJobs),
+        min_match_score: Number(minMatchScore),
+        skip_already_applied: Boolean(skipAlreadyApplied),
+        schedule_interval: scheduleInterval,
+      })
+      setSearchConfig(cfg)
+
+      const result = await triggerJobDiscovery({
+        config_id: cfg.id,
+        search_url: cfg.platform_search_url,
+        max_results: cfg.max_jobs_to_discover,
+        min_match_score: Number(minMatchScore),
+        skip_already_applied: Boolean(skipAlreadyApplied),
+      })
+
+      const refreshed = await getDiscoveredJobs()
+      setDiscoveredJobs(refreshed)
+      setSuccessMsg(`Discovered ${result.total_discovered} jobs. ${result.total_matched} match your criteria.`)
+      setTimeout(() => setSuccessMsg(''), 5000)
+    } catch {
+      setError('Job discovery encountered an issue. Ensure platform search URL is valid.')
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  async function handleQueueJob(jobId: string) {
+    setJobActionLoading((prev) => ({ ...prev, [jobId]: true }))
+    try {
+      const updated = await queueDiscoveredJob(jobId)
+      setDiscoveredJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)))
+      setSuccessMsg(`Job candidate "${updated.exact_title}" queued.`)
+      setTimeout(() => setSuccessMsg(''), 4000)
+    } catch {
+      setError('Failed to queue job.')
+    } finally {
+      setJobActionLoading((prev) => ({ ...prev, [jobId]: false }))
+    }
+  }
+
+  async function handleApplyJob(jobId: string) {
+    setJobActionLoading((prev) => ({ ...prev, [jobId]: true }))
+    try {
+      const newRun = await applyDiscoveredJob(jobId)
+      setRuns((prev) => [newRun, ...prev])
+      const refreshed = await getDiscoveredJobs()
+      setDiscoveredJobs(refreshed)
+      setSuccessMsg(`Application launched for "${newRun.company} - ${newRun.job_title}". Locked exact job identity.`)
+      setTimeout(() => setSuccessMsg(''), 5000)
+    } catch {
+      setError('Failed to launch application for this job.')
+    } finally {
+      setJobActionLoading((prev) => ({ ...prev, [jobId]: false }))
     }
   }
 
@@ -295,6 +451,17 @@ export function AutomationDashboard() {
           <Icon name="play" /> Runs & Status
         </button>
         <button
+          className={`pb-3 px-4 font-medium text-sm flex items-center gap-2 border-b-2 transition ${activeTab === 'search' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('search')}
+        >
+          <Icon name="search" /> Job Search
+          {discoveredJobs.length > 0 && (
+            <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-0.5 rounded-full font-bold">
+              {discoveredJobs.length}
+            </span>
+          )}
+        </button>
+        <button
           className={`pb-3 px-4 font-medium text-sm flex items-center gap-2 border-b-2 transition ${activeTab === 'interventions' ? 'border-amber-500 text-amber-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           onClick={() => setActiveTab('interventions')}
         >
@@ -429,6 +596,451 @@ export function AutomationDashboard() {
         </section>
       )}
 
+      {/* TAB: JOB SEARCH & MULTI-JOB DISCOVERY */}
+      {activeTab === 'search' && (
+        <section className="job-search-section space-y-6">
+          {/* Configuration Card */}
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6 shadow-sm">
+            <div className="flex flex-col md:flex-row md:items-center justify-between pb-4 mb-6 border-b border-gray-200 dark:border-gray-800 gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <Icon name="search" /> Job Search & Multi-Job Discovery
+                </h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  Configure target search criteria, discover job openings across configured platforms, and score candidate compatibility.
+                  {searchConfig?.id && (
+                    <span className="ml-2 text-indigo-600 dark:text-indigo-400 font-medium">
+                      (Config saved)
+                    </span>
+                  )}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={savingConfig}
+                  onClick={handleSaveSearchConfig}
+                  className="px-4 py-2 text-xs font-semibold text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition border border-gray-300 dark:border-gray-700"
+                >
+                  {savingConfig ? 'Saving...' : 'Save Configuration'}
+                </button>
+                <button
+                  type="button"
+                  disabled={discovering || !desiredJobTitle || !desiredLocation || !platformSearchUrl}
+                  onClick={handleTriggerDiscovery}
+                  className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {discovering ? (
+                    <>
+                      <Icon name="refresh" className="animate-spin" /> Discovering...
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="search" /> Discover Jobs
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleSaveSearchConfig} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Desired Job Title <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Software Developer"
+                  value={desiredJobTitle}
+                  onChange={(e) => setDesiredJobTitle(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                />
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Flexible title matching with canonical normalization</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Desired Location <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Bangalore, Remote, San Francisco"
+                  value={desiredLocation}
+                  onChange={(e) => setDesiredLocation(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                />
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Supports metro clusters (e.g. Bengaluru, Bay Area, Remote)</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Years of Work Experience <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min={0}
+                  max={50}
+                  step={0.5}
+                  placeholder="3"
+                  value={yearsOfExp}
+                  onChange={(e) => setYearsOfExp(parseFloat(e.target.value) || 0)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                />
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Used for 20% experience range compatibility scoring</span>
+              </div>
+
+              <div className="lg:col-span-2">
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Platform / Job Search URL <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="url"
+                  required
+                  placeholder="e.g. https://www.naukri.com/software-developer-jobs-in-bangalore or search results page"
+                  value={platformSearchUrl}
+                  onChange={(e) => setPlatformSearchUrl(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white font-mono text-xs"
+                />
+                <span className="text-[11px] text-gray-500 mt-0.5 block">URL where multi-job listings are scraped and candidate links are extracted</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Specific Company <span className="text-gray-400 font-normal">(Optional)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Google, Amazon, Stripe"
+                  value={specificCompany}
+                  onChange={(e) => setSpecificCompany(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                />
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Filter discovery strictly or prioritize target company</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Active Resume for Skills Matching
+                </label>
+                <select
+                  value={selectedResumeId}
+                  onChange={(e) => setSelectedResumeId(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                >
+                  <option value="">-- Select Active Resume --</option>
+                  {resumes.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.filename} {r.is_active ? '(Active)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Skills from resume used for 25% skill overlap scoring</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Max Jobs to Discover
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={maxJobs}
+                  onChange={(e) => setMaxJobs(parseInt(e.target.value) || 10)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                />
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Default: 10 job candidates</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Min Match Score ({minMatchScore}%)
+                </label>
+                <input
+                  type="range"
+                  min={20}
+                  max={95}
+                  step={5}
+                  value={minMatchScore}
+                  onChange={(e) => setMinMatchScore(parseInt(e.target.value) || 60)}
+                  className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                />
+                <div className="flex justify-between text-[11px] text-gray-500 mt-1">
+                  <span>20% (Loose)</span>
+                  <span className="font-bold text-indigo-600 dark:text-indigo-400">{minMatchScore}%</span>
+                  <span>95% (Strict)</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+                  Schedule Interval
+                </label>
+                <select
+                  value={scheduleInterval}
+                  onChange={(e) => setScheduleInterval(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                >
+                  <option value="manual">Manual Only</option>
+                  <option value="hourly">Every Hour</option>
+                  <option value="4h">Every 4 Hours</option>
+                  <option value="daily">Daily</option>
+                </select>
+                <span className="text-[11px] text-gray-500 mt-0.5 block">Periodic automated background search</span>
+              </div>
+
+              <div className="flex items-center gap-2 pt-6">
+                <input
+                  type="checkbox"
+                  id="skip-already-applied"
+                  checked={skipAlreadyApplied}
+                  onChange={(e) => setSkipAlreadyApplied(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                />
+                <label htmlFor="skip-already-applied" className="text-xs font-bold text-gray-800 dark:text-gray-200 cursor-pointer">
+                  Skip Already Applied Postings
+                </label>
+              </div>
+            </form>
+          </div>
+
+          {/* Discovery Results Section */}
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6 shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-4 border-b border-gray-200 dark:border-gray-800 gap-3">
+              <div>
+                <h3 className="text-base font-bold text-gray-900 dark:text-white">
+                  Discovered Job Candidates ({discoveredJobs.length})
+                </h3>
+                <p className="text-xs text-gray-500">
+                  Ranked by composite match score (Title 40%, Skills 25%, Experience 20%, Location 15%).
+                </p>
+              </div>
+
+              {/* Status Filter Buttons */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                {['all', 'DISCOVERED', 'QUEUED', 'APPLYING', 'APPLIED'].map((filterVal) => (
+                  <button
+                    key={filterVal}
+                    type="button"
+                    onClick={() => setDiscoveryFilter(filterVal)}
+                    className={`px-3 py-1 rounded-full text-xs font-medium transition ${
+                      discoveryFilter === filterVal
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                    }`}
+                  >
+                    {filterVal === 'all' ? 'All' : filterVal}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {discoveredJobs.length === 0 ? (
+              <div className="p-12 text-center border border-dashed border-gray-200 dark:border-gray-800 rounded-xl">
+                <div className="w-12 h-12 rounded-full bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 flex items-center justify-center mx-auto mb-2">
+                  <Icon name="search" />
+                </div>
+                <h4 className="text-sm font-semibold text-gray-900 dark:text-white">No jobs discovered yet</h4>
+                <p className="text-xs text-gray-500 max-w-sm mx-auto mt-1">
+                  Configure your search preferences above and click &quot;Discover Jobs&quot; to fetch candidate openings.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {discoveredJobs
+                  .filter((job) => discoveryFilter === 'all' || job.status.toUpperCase() === discoveryFilter.toUpperCase())
+                  .map((job) => {
+                    let reasons: string[] = []
+                    try {
+                      if (job.match_reasons_json) {
+                        reasons = JSON.parse(job.match_reasons_json)
+                      }
+                    } catch {}
+
+                    let breakdown: any = {}
+                    try {
+                      if (job.match_breakdown_json) {
+                        breakdown = JSON.parse(job.match_breakdown_json)
+                      }
+                    } catch {}
+
+                    const score = job.match_score ?? 0
+                    const scoreColor =
+                      score >= 80
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                        : score >= 60
+                          ? 'bg-amber-50 text-amber-700 border-amber-300'
+                          : 'bg-rose-50 text-rose-700 border-rose-300'
+
+                    return (
+                      <div
+                        key={job.id}
+                        className="border border-gray-200 dark:border-gray-800 rounded-xl p-5 hover:border-indigo-200 dark:hover:border-indigo-900 transition bg-white dark:bg-gray-900 shadow-sm"
+                      >
+                        <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap mb-1">
+                              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${scoreColor}`}>
+                                {score.toFixed(0)}% Match
+                              </span>
+                              <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 uppercase font-semibold">
+                                {job.platform}
+                              </span>
+                              <span className="text-xs px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 font-semibold">
+                                {job.status}
+                              </span>
+                              {job.requisition_id && (
+                                <span className="text-xs px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 font-mono font-semibold border border-amber-200 dark:border-amber-800">
+                                  Req: {job.requisition_id}
+                                </span>
+                              )}
+                            </div>
+
+                            <h4 className="text-base font-bold text-gray-900 dark:text-white truncate">
+                              {job.exact_title}
+                            </h4>
+                            <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mt-0.5">
+                              {job.company} &bull; <span className="text-gray-500">{job.location || 'Location Unspecified'}</span>
+                              {job.experience_raw && (
+                                <span className="ml-2 text-indigo-600 dark:text-indigo-400 font-medium">
+                                  &bull; Exp: {job.experience_raw}
+                                </span>
+                              )}
+                            </p>
+
+                            {/* Score Breakdown Pills */}
+                            <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
+                              <span className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-700 dark:text-gray-300">
+                                Title: <strong className="text-gray-900 dark:text-white">{breakdown.title_score ?? 0}%</strong> (40%)
+                              </span>
+                              <span className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-700 dark:text-gray-300">
+                                Skills: <strong className="text-gray-900 dark:text-white">{breakdown.skills_score ?? 0}%</strong> (25%)
+                              </span>
+                              <span className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-700 dark:text-gray-300">
+                                Exp: <strong className="text-gray-900 dark:text-white">{breakdown.experience_score ?? 0}%</strong> (20%)
+                              </span>
+                              <span className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-700 dark:text-gray-300">
+                                Location: <strong className="text-gray-900 dark:text-white">{breakdown.location_score ?? 0}%</strong> (15%)
+                              </span>
+                            </div>
+
+                            {/* Matched & Missing Skills */}
+                            {(() => {
+                              let matchedSkills: string[] = job.matched_skills || []
+                              let missingSkills: string[] = job.missing_skills || []
+                              try {
+                                if (!matchedSkills.length && job.matched_skills_json) {
+                                  matchedSkills = JSON.parse(job.matched_skills_json)
+                                }
+                              } catch {}
+                              try {
+                                if (!missingSkills.length && job.missing_skills_json) {
+                                  missingSkills = JSON.parse(job.missing_skills_json)
+                                }
+                              } catch {}
+
+                              if (!matchedSkills.length && !missingSkills.length) return null
+
+                              return (
+                                <div className="mt-3 space-y-1.5">
+                                  {matchedSkills.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="text-[11px] font-bold text-emerald-800 dark:text-emerald-400">
+                                        Matched Skills:
+                                      </span>
+                                      {matchedSkills.map((s, idx) => (
+                                        <span
+                                          key={idx}
+                                          className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 text-[10px] font-semibold px-2 py-0.5 rounded-md"
+                                        >
+                                          {s}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {missingSkills.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="text-[11px] font-bold text-amber-800 dark:text-amber-400">
+                                        Missing Skills:
+                                      </span>
+                                      {missingSkills.slice(0, 6).map((s, idx) => (
+                                        <span
+                                          key={idx}
+                                          className="bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800 text-[10px] font-semibold px-2 py-0.5 rounded-md"
+                                        >
+                                          {s}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })()}
+
+                            {/* Reasoning */}
+                            {reasons.length > 0 && (
+                              <div className="mt-2.5 space-y-1">
+                                {reasons.slice(0, 3).map((r, i) => (
+                                  <p key={i} className="text-[11px] text-gray-600 dark:text-gray-400 flex items-center gap-1.5">
+                                    <span className="text-emerald-500 font-bold">&check;</span> {r}
+                                  </p>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="flex flex-row md:flex-col gap-2 shrink-0 items-end">
+                            <a
+                              href={job.job_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-3 py-1.5 text-xs font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded border border-indigo-200 transition"
+                            >
+                              Open Job &rarr;
+                            </a>
+
+                            {job.status === 'DISCOVERED' && (
+                              <button
+                                type="button"
+                                disabled={jobActionLoading[job.id]}
+                                onClick={() => handleQueueJob(job.id)}
+                                className="px-3 py-1.5 text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-800 rounded border border-gray-300 transition disabled:opacity-50"
+                              >
+                                {jobActionLoading[job.id] ? 'Queueing...' : 'Queue Job'}
+                              </button>
+                            )}
+
+                            {job.status !== 'APPLIED' && job.status !== 'APPLYING' && (
+                              <button
+                                type="button"
+                                disabled={jobActionLoading[job.id]}
+                                onClick={() => handleApplyJob(job.id)}
+                                className="px-3 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded shadow-sm transition disabled:opacity-50"
+                              >
+                                {jobActionLoading[job.id] ? 'Launching...' : 'Apply Now'}
+                              </button>
+                            )}
+
+                            {job.status === 'APPLIED' && (
+                              <span className="text-xs font-bold text-emerald-600 px-3 py-1">
+                                &check; Applied
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* TAB 2: HUMAN INTERVENTION PANEL */}
       {activeTab === 'interventions' && (
         <section className="interventions-section">
@@ -443,77 +1055,159 @@ export function AutomationDashboard() {
               </p>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-6">
               {waitingRuns.map((run) => {
                 const ctx = getContextData(run)
                 const suggested = getSuggestedValue(run)
+                const isRealTrackedUrl =
+                  Boolean(run.current_url) &&
+                  !run.current_url!.includes('about:blank') &&
+                  (run.current_url!.startsWith('http://') || run.current_url!.startsWith('https://'))
+
                 return (
                   <div
                     key={run.id}
-                    className="bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl p-6 shadow-sm"
+                    className="bg-[#fcfaf6] border-2 border-amber-300/90 rounded-xl p-6 shadow-md"
                   >
-                    <div className="flex items-center justify-between mb-4 border-b border-amber-200 dark:border-amber-800/60 pb-3">
+                    {/* Header */}
+                    <div className="flex items-center justify-between mb-4 border-b border-amber-200 pb-3">
                       <div>
-                        <span className="text-xs font-semibold uppercase text-amber-700 dark:text-amber-400">
+                        <span className="text-xs font-extrabold uppercase tracking-wider text-amber-900">
                           Human Input Required
                         </span>
-                        <h3 className="text-lg font-bold text-gray-900 dark:text-white mt-0.5">
-                          {run.company} — {run.job_title}
+                        <h3 className="text-xl font-black text-gray-950 mt-0.5">
+                          {run.company} &mdash; {run.job_title}
                         </h3>
                       </div>
-                      <span className="text-xs text-gray-500">Step: {run.current_step || 'Application'}</span>
+                      <span className="text-xs font-bold text-amber-950 bg-amber-100/90 border border-amber-300 px-2.5 py-1 rounded-md">
+                        Step: {run.current_step || 'Submission Review'}
+                      </span>
                     </div>
 
-                    <div className="mb-4">
-                      <p className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-1">
-                        {run.user_prompt}
+                    {/* CURRENT PAGE / URL TRACKING CARD */}
+                    <div className="bg-white border border-amber-300/80 rounded-lg p-4 mb-5 shadow-sm">
+                      <div className="flex items-center justify-between mb-3 pb-2 border-b border-amber-100">
+                        <span className="text-xs font-bold uppercase tracking-wider text-gray-800 flex items-center gap-1.5">
+                          <Icon name="link" /> Current Page
+                        </span>
+                        {isRealTrackedUrl ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+                            <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse" />
+                            Live URL Tracked
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
+                            Initial Navigation
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-3 text-xs">
+                        <div>
+                          <span className="font-bold text-gray-900 block mb-1">URL:</span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-xs font-medium text-gray-900 bg-gray-50 border border-gray-300 px-2.5 py-1.5 rounded select-all break-all flex-1 min-w-[200px]">
+                              {isRealTrackedUrl ? run.current_url : (run.job_url || 'Navigation starting...')}
+                            </span>
+                            {isRealTrackedUrl && (
+                              <button
+                                type="button"
+                                onClick={() => handleCopyUrl(run.current_url!)}
+                                className="px-3 py-1.5 text-xs font-bold bg-gray-100 hover:bg-gray-200 text-gray-900 rounded border border-gray-400 transition shrink-0 shadow-sm"
+                              >
+                                {copiedUrl === run.current_url ? 'Copied!' : 'Copy URL'}
+                              </button>
+                            )}
+                            {isRealTrackedUrl && (
+                              <a
+                                href={run.current_url!}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-3 py-1.5 text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-800 rounded border border-indigo-300 transition shrink-0 shadow-sm"
+                              >
+                                Open Current Page &rarr;
+                              </a>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                          <div>
+                            <span className="font-bold text-gray-900 block mb-0.5">PAGE TITLE:</span>
+                            <p className="font-semibold text-gray-900 bg-gray-50 border border-gray-300 px-2.5 py-1.5 rounded">
+                              {run.page_title || run.job_title || 'Application Portal Page'}
+                            </p>
+                          </div>
+                          <div>
+                            <span className="font-bold text-gray-900 block mb-0.5">STEP:</span>
+                            <p className="font-semibold text-gray-900 bg-gray-50 border border-gray-300 px-2.5 py-1.5 rounded">
+                              {run.current_step || 'Submission Review'}
+                            </p>
+                          </div>
+                        </div>
+
+                        {Boolean(ctx.confidence_reason) && (
+                          <div className="pt-1">
+                            <span className="font-bold text-gray-900 block mb-0.5">REASON:</span>
+                            <p className="font-medium text-amber-950 bg-amber-50/80 border border-amber-200 px-2.5 py-1.5 rounded">
+                              {String(ctx.confidence_reason)}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Prompt Box */}
+                    <div className="bg-amber-100/80 border border-amber-300 rounded-lg p-4 mb-4 shadow-sm">
+                      <p className="text-base font-bold text-gray-950 leading-snug">
+                        {run.user_prompt || 'Form completed! Please review and approve final application submission.'}
                       </p>
-                      {typeof ctx.confidence_reason === 'string' && (
-                        <p className="text-xs text-gray-500 italic mt-1">
-                          Reason: {ctx.confidence_reason}
-                        </p>
-                      )}
                     </div>
 
                     {suggested && (
-                      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-3 mb-4 text-xs">
-                        <span className="font-semibold text-gray-600 dark:text-gray-400">Suggested Action: </span>
-                        <code className="text-indigo-600 dark:text-indigo-400 font-mono">{suggested}</code>
+                      <div className="bg-white border border-indigo-200 rounded-lg p-3.5 mb-4 text-xs shadow-sm">
+                        <span className="font-bold text-gray-900 text-sm">Suggested Action / Value: </span>
+                        <code className="text-indigo-900 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded font-mono font-bold text-sm ml-1">
+                          {suggested}
+                        </code>
                       </div>
                     )}
 
+                    {/* Answer Input */}
                     <div className="mb-4">
-                      <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      <label className="block text-sm font-bold text-gray-950 mb-1.5">
                         Your answer or customized value:
                       </label>
                       <input
                         type="text"
-                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                        className="w-full px-3.5 py-2.5 border-2 border-gray-300 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 rounded-lg text-sm bg-white text-gray-950 font-semibold placeholder:text-gray-500 shadow-sm"
                         placeholder={suggested || 'Type your manual answer here...'}
                         value={interventionValue}
                         onChange={(e) => setInterventionValue(e.target.value)}
                       />
                     </div>
 
-                    <div className="flex items-center gap-2 mb-4">
+                    {/* Remember Checkbox */}
+                    <div className="flex items-center gap-2.5 mb-5 bg-white/70 border border-amber-200 p-2.5 rounded-lg">
                       <input
                         type="checkbox"
                         id={`remember-${run.id}`}
                         checked={rememberScenario}
                         onChange={(e) => setRememberScenario(e.target.checked)}
-                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        className="w-4 h-4 rounded border-gray-400 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                       />
-                      <label htmlFor={`remember-${run.id}`} className="text-xs text-gray-600 dark:text-gray-400">
+                      <label htmlFor={`remember-${run.id}`} className="text-sm font-bold text-gray-950 cursor-pointer select-none">
                         Remember this answer in Scenario Memory for future runs
                       </label>
                     </div>
 
-                    <div className="flex gap-2">
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap gap-2.5">
                       {suggested && (
                         <button
                           disabled={submittingIntervention}
                           onClick={() => handleIntervene(run, 'approve')}
-                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 rounded-lg font-medium transition"
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2.5 rounded-lg transition shadow-sm"
                         >
                           Approve Suggested
                         </button>
@@ -521,21 +1215,21 @@ export function AutomationDashboard() {
                       <button
                         disabled={submittingIntervention || !interventionValue.trim()}
                         onClick={() => handleIntervene(run, 'edit')}
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2 rounded-lg font-medium transition disabled:opacity-50"
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2.5 rounded-lg transition disabled:opacity-50 shadow-sm"
                       >
                         Submit Answer
                       </button>
                       <button
                         disabled={submittingIntervention}
                         onClick={() => handleIntervene(run, 'pause')}
-                        className="bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 text-gray-700 dark:text-gray-300 text-xs px-3 py-2 rounded-lg transition"
+                        className="bg-gray-200 hover:bg-gray-300 text-gray-900 text-xs font-bold px-4 py-2.5 rounded-lg transition border border-gray-300"
                       >
                         Pause
                       </button>
                       <button
                         disabled={submittingIntervention}
                         onClick={() => handleIntervene(run, 'reject')}
-                        className="bg-red-50 text-red-600 hover:bg-red-100 text-xs px-3 py-2 rounded-lg transition"
+                        className="bg-red-100 hover:bg-red-200 text-red-900 text-xs font-bold px-4 py-2.5 rounded-lg transition border border-red-300"
                       >
                         Reject & Stop
                       </button>

@@ -32,6 +32,7 @@ VALID_TRANSITIONS: dict[AutomationState, Set[AutomationState]] = {
     },
     AutomationState.JOB_SELECTED: {
         AutomationState.APPLICATION_STARTED,
+        AutomationState.WAITING_FOR_USER,
         AutomationState.FAILED,
         AutomationState.PAUSED,
     },

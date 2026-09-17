@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     )
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+    password_reset_token_expire_minutes: int = 15
     resume_upload_dir: str = "uploads/resumes"
     resume_max_size_mb: int = Field(default=10, ge=1, le=50)
     ai_provider: str | None = None

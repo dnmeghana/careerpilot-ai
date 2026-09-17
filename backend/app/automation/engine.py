@@ -53,10 +53,15 @@ def is_valid_http_url(url: Optional[str]) -> bool:
 class PlaywrightAutomationEngine:
     """Core browser automation engine powered by Playwright."""
     """Core browser automation engine coordinating multi-company form execution."""
-
-    def __init__(self, headless: bool = True) -> None:
+    def __init__(
+        self,
+        headless: bool = True,
+        screenshot_dir: Optional[Union[str, Path]] = None,
+        screenshots_dir: Optional[Union[str, Path]] = None,
+    ) -> None:
         self.headless = headless
-        self.screenshot_dir = Path("uploads/automation_screenshots")
+        target_dir = screenshot_dir or screenshots_dir or "uploads/automation_screenshots"
+        self.screenshot_dir = Path(target_dir)
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.ai_agent = AutomationAIAgent()
         self.scenario_registry = get_scenario_registry()
@@ -139,7 +144,7 @@ class PlaywrightAutomationEngine:
         run.page_title = title if title else None
         return run.current_url or "", run.page_title or ""
 
-    def _get_selected_identity(self, run: AutomationRun, db: Session) -> SelectedJobIdentity:
+    def _get_selected_identity(self, run: AutomationRun, db: Session) -> Optional[SelectedJobIdentity]:
         """Resolve the selected job's exact identity from run context or database."""
         if run.user_prompt_context_json:
             try:
@@ -149,30 +154,25 @@ class PlaywrightAutomationEngine:
             except Exception:
                 pass
 
-        location = None
-        req_id = None
-        source = "portal"
         if run.job_id:
             try:
                 job = db.query(Job).filter(Job.id == run.job_id).first()
                 if job:
                     location = job.location
                     req_id = extract_requisition_id_from_url_or_text(job.url or "")
+                    return SelectedJobIdentity(
+                        company=job.company or run.company,
+                        exact_title=job.title or run.job_title,
+                        job_url=job.url or run.job_url or "",
+                        job_id=job.id,
+                        requisition_id=req_id,
+                        location=location,
+                        source="portal",
+                    )
             except Exception:
                 pass
 
-        if not req_id and run.job_url:
-            req_id = extract_requisition_id_from_url_or_text(run.job_url)
-
-        return SelectedJobIdentity(
-            company=run.company,
-            exact_title=run.job_title,
-            job_url=run.job_url or "",
-            job_id=run.job_id,
-            requisition_id=req_id,
-            location=location,
-            source=source,
-        )
+        return None
 
     def _record_log(
         self,
@@ -293,41 +293,58 @@ class PlaywrightAutomationEngine:
                         confidence_reason=f"Navigated to job posting: {url}",
                     )
 
-                    # Verify current page matches the selected job identity
+                    # Verify current page matches the selected job identity if one was selected
                     selected_identity = self._get_selected_identity(run, db)
-                    page_text = ""
-                    try:
-                        page_text = await page.inner_text("body")
-                    except Exception:
-                        pass
+                    if selected_identity:
+                        page_text = ""
+                        try:
+                            page_text = await page.inner_text("body")
+                        except Exception:
+                            pass
 
-                    verification = verify_current_page_matches_selected_job(
-                        selected_job=selected_identity,
-                        current_url=url,
-                        page_title=title,
-                        page_content=page_text,
-                    )
-
-                    if not verification.is_verified:
-                        screenshot = await self.capture_screenshot(page, run.id, "job_identity_mismatch")
-                        run.screenshot_path = screenshot
-                        run.current_step = "Job Identity Verification Mismatch"
-                        run.status = state_machine.transition(AutomationState.WAITING_FOR_USER).value
-                        run.requires_user_action = True
-                        run.user_prompt = (
-                            f"Job identity verification failed: {verification.reason}. "
-                            f"Please verify that the opened page matches the intended job posting before continuing."
+                        verification = verify_current_page_matches_selected_job(
+                            selected_job=selected_identity,
+                            current_url=url,
+                            page_title=title,
+                            page_content=page_text,
                         )
-                        run.user_prompt_context_json = json.dumps({
-                            "reason": verification.reason,
-                            "current_url": url,
-                            "page_title": title,
-                            "step": "Job Identity Verification Mismatch",
-                            "company": run.company,
-                            "job_title": run.job_title,
-                            "verification_details": verification.details,
-                            "selected_job_identity": selected_identity.to_dict(),
-                        })
+
+                        if not verification.is_verified:
+                            screenshot = await self.capture_screenshot(page, run.id, "job_identity_mismatch")
+                            run.screenshot_path = screenshot
+                            run.current_step = "Job Identity Verification Mismatch"
+                            run.status = state_machine.transition(AutomationState.WAITING_FOR_USER).value
+                            run.requires_user_action = True
+                            run.user_prompt = (
+                                f"Job identity verification failed: {verification.reason}. "
+                                f"Please verify that the opened page matches the intended job posting before continuing."
+                            )
+                            run.user_prompt_context_json = json.dumps({
+                                "reason": verification.reason,
+                                "current_url": url,
+                                "page_title": title,
+                                "step": "Job Identity Verification Mismatch",
+                                "company": run.company,
+                                "job_title": run.job_title,
+                                "verification_details": verification.details,
+                                "selected_job_identity": selected_identity.to_dict(),
+                            })
+                            self._record_log(
+                                db=db,
+                                run=run,
+                                action_type="verify_job_identity",
+                                action_source="verification",
+                                step_name="Job Identity Verification",
+                                current_url=url,
+                                page_title=title,
+                                result="mismatch",
+                                confidence=verification.confidence,
+                                confidence_reason=verification.reason,
+                                screenshot_path=screenshot,
+                            )
+                            db.commit()
+                            return run
+
                         self._record_log(
                             db=db,
                             run=run,
@@ -336,26 +353,10 @@ class PlaywrightAutomationEngine:
                             step_name="Job Identity Verification",
                             current_url=url,
                             page_title=title,
-                            result="mismatch",
+                            result="verified",
                             confidence=verification.confidence,
                             confidence_reason=verification.reason,
-                            screenshot_path=screenshot,
                         )
-                        db.commit()
-                        return run
-
-                    self._record_log(
-                        db=db,
-                        run=run,
-                        action_type="verify_job_identity",
-                        action_source="verification",
-                        step_name="Job Identity Verification",
-                        current_url=url,
-                        page_title=title,
-                        result="verified",
-                        confidence=verification.confidence,
-                        confidence_reason=verification.reason,
-                    )
 
                     run.status = state_machine.transition(AutomationState.APPLICATION_STARTED).value
                     run.current_step = "Starting Application Form"
@@ -846,6 +847,9 @@ class PlaywrightAutomationEngine:
                     confidence="HIGH",
                     confidence_reason=f"Persisted after successful AI resolution: {ai_resolution.confidence_reason}",
                 )
+
+            if success:
+                run.scenarios_used_count += 1
 
             state_machine.transition(AutomationState.FORM_IN_PROGRESS)
             run.status = AutomationState.FORM_IN_PROGRESS.value

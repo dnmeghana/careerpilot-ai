@@ -12,8 +12,15 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
 from ..models import Application, AutomationRun, AutomationSetting, Job, User
+from ..models import Application, AutomationRun, AutomationSetting, DiscoveredJob, Job, JobSearchConfig, Resume, User
 from .companies.registry import get_adapter_registry
 from .engine import PlaywrightAutomationEngine
+from .matcher import (
+    JobMatchScorer,
+    SelectedJobIdentity,
+    extract_requisition_id_from_url_or_text,
+    is_duplicate_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +65,7 @@ class AutomationScheduler:
     async def run_scheduled_checks(self) -> None:
         """Check all users with active automation schedules and execute due jobs."""
         with SessionLocal() as db:
+            # 1. Check legacy AutomationSetting schedules
             users_with_settings = db.scalars(
                 select(AutomationSetting).where(
                     AutomationSetting.is_enabled == True,
@@ -68,6 +76,171 @@ class AutomationScheduler:
             for setting in users_with_settings:
                 if self._is_schedule_due(setting):
                     await self.process_user_schedule(db, setting.user_id)
+
+            # 2. Check JobSearchConfig schedules
+            configs = db.scalars(
+                select(JobSearchConfig).where(
+                    JobSearchConfig.is_active == True,
+                    JobSearchConfig.schedule_interval != "manual",
+                )
+            ).all()
+
+            for config in configs:
+                if self._is_search_config_due(config):
+                    await self.process_search_config_schedule(db, config.id)
+
+    def _is_search_config_due(self, config: JobSearchConfig) -> bool:
+        """Determine if a job search config discovery check is due."""
+        interval_str = (config.schedule_interval or "manual").lower()
+        if interval_str == "manual":
+            return False
+
+        interval_hours = 24
+        if interval_str in ("1h", "every hour", "hourly"):
+            interval_hours = 1
+        elif interval_str in ("4h", "every 4 hours"):
+            interval_hours = 4
+        elif interval_str in ("daily", "24h"):
+            interval_hours = 24
+
+        last_time = config.last_searched_at
+        if not last_time:
+            return True
+
+        now = datetime.now(timezone.utc)
+        if last_time.tzinfo is None:
+            last_time = last_time.replace(tzinfo=timezone.utc)
+
+        return now - last_time >= timedelta(hours=interval_hours)
+
+    async def process_search_config_schedule(self, db: Session, config_id: UUID) -> List[DiscoveredJob]:
+        """Execute scheduled multi-job discovery for a JobSearchConfig."""
+        config = db.get(JobSearchConfig, config_id)
+        if not config or not config.is_active:
+            return []
+
+        search_url = (config.platform_search_url or "").strip()
+        if not search_url:
+            return []
+
+        adapter = self.adapter_registry.get_adapter_for_url(search_url)
+        max_results = config.max_jobs_to_discover or 10
+        desired_title = config.desired_job_title
+        desired_location = config.desired_location
+        user_experience = config.years_of_experience
+        specific_company = config.specific_company
+        min_score = config.min_match_score if config.min_match_score is not None else 60.0
+        skip_applied = config.skip_already_applied if config.skip_already_applied is not None else True
+
+        # Load active resume skills
+        resume = None
+        if config.active_resume_id:
+            resume = db.get(Resume, config.active_resume_id)
+        if not resume:
+            resume = db.scalar(
+                select(Resume).where(Resume.user_id == config.user_id, Resume.is_active == True)
+            )
+
+        user_skills = []
+        if resume and resume.extracted_text:
+            common_tech = ["python", "javascript", "typescript", "react", "fastapi", "docker", "aws", "sql", "postgresql", "node", "java", "kubernetes", "git"]
+            for tech in common_tech:
+                if tech in resume.extracted_text.lower():
+                    user_skills.append(tech.title())
+
+        discovered_raw = []
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                try:
+                    discovered_raw = await adapter.discover_jobs_from_search(page, search_url, max_jobs=max_results)
+                except Exception:
+                    pass
+                await browser.close()
+        except Exception:
+            discovered_raw = adapter.discover_jobs(query=desired_title, location=desired_location or "")
+
+        existing_jobs = list(
+            db.scalars(select(DiscoveredJob).where(DiscoveredJob.user_id == config.user_id)).all()
+        )
+        already_applied_targets = []
+        if skip_applied:
+            applied_jobs = list(
+                db.scalars(
+                    select(DiscoveredJob).where(
+                        DiscoveredJob.user_id == config.user_id,
+                        DiscoveredJob.status.in_(["APPLIED", "APPLYING", "QUEUED"]),
+                    )
+                ).all()
+            )
+            applied_apps = list(
+                db.scalars(
+                    select(Application).where(Application.user_id == config.user_id)
+                ).all()
+            )
+            already_applied_targets = applied_jobs + applied_apps
+
+        scorer = JobMatchScorer(match_threshold=min_score)
+        new_jobs = []
+
+        for cand in discovered_raw:
+            if is_duplicate_candidate(
+                candidate_url=cand.url,
+                candidate_title=cand.title,
+                candidate_company=cand.company,
+                existing_records=existing_jobs,
+                candidate_requisition_id=cand.requisition_id,
+                candidate_location=cand.location,
+                already_applied_records=already_applied_targets if skip_applied else None,
+            ):
+                continue
+
+            score_res = scorer.score_job(
+                target_role=desired_title,
+                candidate_title=cand.title,
+                candidate_description=cand.description,
+                candidate_location=cand.location,
+                candidate_skills=cand.skills,
+                user_skills=user_skills,
+                user_location=desired_location,
+                user_experience_years=user_experience,
+                candidate_company=cand.company,
+                specific_company=specific_company,
+                candidate_experience_str=cand.experience_str,
+            )
+
+            db_job = DiscoveredJob(
+                user_id=config.user_id,
+                config_id=config.id,
+                company=cand.company,
+                exact_title=cand.title,
+                job_url=cand.url,
+                location=cand.location,
+                platform=cand.platform,
+                raw_description=cand.description,
+                requisition_id=cand.requisition_id,
+                experience_raw=cand.experience_str,
+                matched_skills_json=json.dumps(score_res.matched_skills),
+                missing_skills_json=json.dumps(score_res.missing_skills),
+                match_score=score_res.match_score,
+                title_score=score_res.title_score,
+                skills_score=score_res.skills_score,
+                location_score=score_res.location_score,
+                experience_score=score_res.experience_score,
+                is_matched=score_res.is_match,
+                match_reasons_json=json.dumps(score_res.reasons),
+                match_breakdown_json=json.dumps(score_res.breakdown),
+                status="MATCHED" if score_res.is_match else "REJECTED",
+            )
+            db.add(db_job)
+            existing_jobs.append(db_job)
+            new_jobs.append(db_job)
+
+        config.last_searched_at = datetime.now(timezone.utc)
+        db.commit()
+        return new_jobs
 
     def _is_schedule_due(self, setting: AutomationSetting) -> bool:
         """Determine if a scheduled check is due based on setting.schedule_interval."""

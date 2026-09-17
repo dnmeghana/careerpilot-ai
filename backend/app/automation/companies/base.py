@@ -9,11 +9,27 @@ from typing import Any, List, Optional
 class DiscoveredJob:
     title: str
     company: str
-    url: str
+    url: str = ""
     location: Optional[str] = None
     description: Optional[str] = None
     requisition_id: Optional[str] = None
     match_score: Optional[float] = None
+    platform: str = "portal"
+    experience_str: Optional[str] = None
+    skills: List[str] = field(default_factory=list)
+    matched_skills: List[str] = field(default_factory=list)
+    missing_skills: List[str] = field(default_factory=list)
+    job_url: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.url and self.job_url:
+            self.url = self.job_url
+        elif not self.job_url and self.url:
+            self.job_url = self.url
+
+
+
+DiscoveredJobCandidate = DiscoveredJob
 
 
 @dataclass
@@ -54,6 +70,13 @@ class BaseCompanyAdapter(ABC):
 
     def discover_jobs(self, query: str = "", location: str = "") -> List[DiscoveredJob]:
         """Discover jobs matching query and location."""
+        """Discover jobs matching query and location synchronously if supported."""
+        return []
+
+    async def discover_jobs_from_search(
+        self, page: Any, search_url: str, max_jobs: int = 10
+    ) -> List[DiscoveredJob]:
+        """Discover jobs from a platform search URL using Playwright page."""
         return []
 
     async def open_job(self, page: Any, job_url: str) -> bool:

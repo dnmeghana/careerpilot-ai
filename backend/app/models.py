@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -41,6 +42,7 @@ class User(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1)
 
     resumes: Mapped[List[Resume]] = relationship(back_populates="user", cascade="all, delete-orphan")
     jobs: Mapped[List[Job]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -53,6 +55,9 @@ class User(TimestampMixin, Base):
     automation_runs: Mapped[List[AutomationRun]] = relationship(back_populates="user", cascade="all, delete-orphan")
     automation_scenarios: Mapped[List[AutomationScenario]] = relationship(back_populates="user", cascade="all, delete-orphan")
     automation_setting: Mapped[Optional[AutomationSetting]] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+    job_search_config: Mapped[Optional["JobSearchConfig"]] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+    discovered_jobs: Mapped[List["DiscoveredJob"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    password_reset_tokens: Mapped[List["PasswordResetToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Resume(TimestampMixin, Base):
@@ -383,3 +388,74 @@ class AutomationSetting(TimestampMixin, Base):
     delay_between_actions_ms: Mapped[int] = mapped_column(Integer, default=800, server_default="800")
 
     user: Mapped[User] = relationship(back_populates="automation_setting")
+
+
+class JobSearchConfig(TimestampMixin, Base):
+    __tablename__ = "job_search_configs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    desired_job_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    desired_location: Mapped[str] = mapped_column(String(255), nullable=False)
+    years_of_experience: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    platform_search_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    specific_company: Mapped[Optional[str]] = mapped_column(String(255))
+    active_resume_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("resumes.id", ondelete="SET NULL"))
+    max_jobs_to_discover: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
+    min_match_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0, server_default="50.0")
+    skip_already_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    schedule_interval: Mapped[str] = mapped_column(String(32), nullable=False, default="manual", server_default="manual")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    last_searched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(back_populates="job_search_config")
+    discovered_jobs: Mapped[List["DiscoveredJob"]] = relationship(back_populates="config", cascade="all, delete-orphan")
+
+
+class DiscoveredJob(TimestampMixin, Base):
+    __tablename__ = "discovered_jobs"
+    __table_args__ = (
+        Index("ix_discovered_jobs_user_status", "user_id", "status"),
+        Index("ix_discovered_jobs_user_score", "user_id", "match_score"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    config_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("job_search_configs.id", ondelete="SET NULL"), index=True)
+    company: Mapped[str] = mapped_column(String(255), nullable=False)
+    exact_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    job_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    location: Mapped[Optional[str]] = mapped_column(String(255))
+    requisition_id: Mapped[Optional[str]] = mapped_column(String(255))
+    experience_raw: Mapped[Optional[str]] = mapped_column(String(255))
+    platform: Mapped[str] = mapped_column(String(64), nullable=False, default="portal", server_default="portal")
+    raw_description: Mapped[Optional[str]] = mapped_column(Text)
+    match_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    title_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    skills_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    location_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    experience_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_matched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    match_reasons_json: Mapped[Optional[str]] = mapped_column(Text)
+    match_breakdown_json: Mapped[Optional[str]] = mapped_column(Text)
+    matched_skills_json: Mapped[Optional[str]] = mapped_column(Text)
+    missing_skills_json: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DISCOVERED", server_default="DISCOVERED")
+    automation_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("automation_runs.id", ondelete="SET NULL"))
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user: Mapped[User] = relationship(back_populates="discovered_jobs")
+    config: Mapped[Optional[JobSearchConfig]] = relationship(back_populates="discovered_jobs")
+    automation_run: Mapped[Optional[AutomationRun]] = relationship()
+
+
+class PasswordResetToken(TimestampMixin, Base):
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="password_reset_tokens")

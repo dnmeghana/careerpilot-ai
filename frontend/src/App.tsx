@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { api, applicationStatuses, getApiErrorMessage, MAX_RESUME_SIZE_BYTES, uploadResume, analyzeResumeVsJob, type Application, type ApplicationInput, type ApplicationStatus, type Job, type JobInput, type Resume, type ResumeJobAnalysis } from './lib/api'
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { api, applicationStatuses, getApiErrorMessage, MAX_RESUME_SIZE_BYTES, uploadResume, analyzeResumeVsJob, forgotPassword, resetPassword, type Application, type ApplicationInput, type ApplicationStatus, type Job, type JobInput, type Resume, type ResumeJobAnalysis } from './lib/api'
 import { useAuth } from './lib/useAuth'
 import { Icon } from './components/Icon'
 import { AnalysisRequestSelector } from './components/AnalysisRequestSelector'
@@ -282,11 +282,199 @@ function AccessPage({ register = false }: { register?: boolean }) {
     } finally { setSubmitting(false) }
   }
 
-  return <main className="access-page"><div className="access-card"><Link className="brand" to="/"><span className="brand-mark">CP</span><span>CareerPilot</span></Link><div className="eyebrow"><span className="status-dot" /> CareerPilot account</div><h1>{register ? 'Start with a clear next step.' : 'Welcome back.'}</h1><p>{register ? 'Create your workspace and make the search feel more intentional.' : 'Pick up where you left off.'}</p><form onSubmit={submit}>{register && <label>Name<input required value={name} onChange={(event) => setName(event.target.value)} type="text" placeholder="Your name" /></label>}<label>Email<input required value={email} onChange={(event) => setEmail(event.target.value)} type="email" placeholder="you@example.com" /></label><label>Password<input required minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="At least 8 characters" /></label>{register && <label>Confirm password<input required minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} type="password" placeholder="Repeat your password" /></label>}{error && <p className="form-error" role="alert">{error}</p>}<button className="button" disabled={submitting} type="submit">{submitting ? 'Working...' : register ? 'Create account' : 'Log in'} <Icon name="arrow" /></button></form><p className="form-switch">{register ? 'Already have an account?' : 'New to CareerPilot?'} <Link to={register ? '/login' : '/register'}>{register ? 'Log in' : 'Get started'}</Link></p></div></main>
+  return <main className="access-page"><div className="access-card"><Link className="brand" to="/"><span className="brand-mark">CP</span><span>CareerPilot</span></Link><div className="eyebrow"><span className="status-dot" /> CareerPilot account</div><h1>{register ? 'Start with a clear next step.' : 'Welcome back.'}</h1><p>{register ? 'Create your workspace and make the search feel more intentional.' : 'Pick up where you left off.'}</p><form onSubmit={submit}>{register && <label>Name<input required value={name} onChange={(event) => setName(event.target.value)} type="text" placeholder="Your name" /></label>}<label>Email<input required value={email} onChange={(event) => setEmail(event.target.value)} type="email" placeholder="you@example.com" /></label><label>Password<input required minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="At least 8 characters" /></label>{!register && <div className="forgot-password-link-row"><Link to="/forgot-password" className="forgot-password-link">Forgot password?</Link></div>}{register && <label>Confirm password<input required minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} type="password" placeholder="Repeat your password" /></label>}{error && <p className="form-error" role="alert">{error}</p>}<button className="button" disabled={submitting} type="submit">{submitting ? 'Working...' : register ? 'Create account' : 'Log in'} <Icon name="arrow" /></button></form><p className="form-switch">{register ? 'Already have an account?' : 'New to CareerPilot?'} <Link to={register ? '/login' : '/register'}>{register ? 'Log in' : 'Get started'}</Link></p></div></main>
+}
+
+function ForgotPasswordPage() {
+  const { user } = useAuth()
+  const [email, setEmail] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
+  const [devResetUrl, setDevResetUrl] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  if (user) return <Navigate to="/dashboard" replace />
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setSubmitting(true)
+    try {
+      const response = await forgotPassword(email)
+      setSubmitted(true)
+      if (response.dev_reset_url) {
+        setDevResetUrl(response.dev_reset_url)
+      }
+    } catch (requestError: unknown) {
+      setError(getApiErrorMessage(requestError, 'Unable to process your request. Please try again.'))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <main className="access-page">
+      <div className="access-card">
+        <Link className="brand" to="/"><span className="brand-mark">CP</span><span>CareerPilot</span></Link>
+        <div className="eyebrow"><span className="status-dot" /> Account recovery</div>
+        <h1>Forgot Password</h1>
+        <p>Enter your registered email address and we'll help you reset your password.</p>
+
+        {submitted ? (
+          <div className="password-reset-status-card" role="status">
+            <p className="success-banner">
+              If an account exists for this email address, a password reset link has been generated.
+            </p>
+            {devResetUrl && (
+              <div className="dev-reset-notice">
+                <small>Local development link:</small>
+                <Link to={devResetUrl.replace(/^https?:\/\/[^/]+/, '')} className="dev-reset-link">
+                  Open Reset Password Link
+                </Link>
+              </div>
+            )}
+            <p className="form-switch">
+              Remember your password? <Link to="/login">Return to login</Link>
+            </p>
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <label>
+              Email
+              <input
+                required
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+                disabled={submitting}
+              />
+            </label>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button className="button" disabled={submitting} type="submit">
+              {submitting ? 'Sending...' : 'Send Reset Link'} <Icon name="arrow" />
+            </button>
+            <p className="form-switch">
+              Remember your password? <Link to="/login">Back to login</Link>
+            </p>
+          </form>
+        )}
+      </div>
+    </main>
+  )
+}
+
+function ResetPasswordPage() {
+  const { user } = useAuth()
+  const [searchParams] = useSearchParams()
+  const token = searchParams.get('token')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState('')
+
+  if (user) return <Navigate to="/dashboard" replace />
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    if (!token) {
+      setError('Password reset token is missing or invalid. Please request a new link.')
+      return
+    }
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters long.')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+
+    setSubmitting(true)
+    try {
+      await resetPassword(token, newPassword, confirmPassword)
+      setSubmitted(true)
+    } catch (requestError: unknown) {
+      setError(getApiErrorMessage(requestError, 'Unable to reset password. The link may have expired or already been used.'))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <main className="access-page">
+      <div className="access-card">
+        <Link className="brand" to="/"><span className="brand-mark">CP</span><span>CareerPilot</span></Link>
+        <div className="eyebrow"><span className="status-dot" /> Secure password reset</div>
+        <h1>Set New Password</h1>
+        <p>Choose a strong new password for your CareerPilot account.</p>
+
+        {!token ? (
+          <div className="password-reset-status-card">
+            <p className="form-error" role="alert">
+              No reset token found. Please check your reset link or request a new one.
+            </p>
+            <div className="form-actions-center">
+              <Link className="button button-small" to="/forgot-password">
+                Request new link <Icon name="arrow" />
+              </Link>
+            </div>
+          </div>
+        ) : submitted ? (
+          <div className="password-reset-status-card" role="status">
+            <p className="success-banner">
+              Your password has been reset successfully. You can now log in with your new password.
+            </p>
+            <div className="form-actions-center">
+              <Link className="button" to="/login">
+                Return to Login <Icon name="arrow" />
+              </Link>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <label>
+              New Password
+              <input
+                required
+                type="password"
+                minLength={8}
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                placeholder="At least 8 characters"
+                disabled={submitting}
+              />
+            </label>
+            <label>
+              Confirm New Password
+              <input
+                required
+                type="password"
+                minLength={8}
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                placeholder="Repeat your new password"
+                disabled={submitting}
+              />
+            </label>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button className="button" disabled={submitting} type="submit">
+              {submitting ? 'Resetting...' : 'Reset Password'} <Icon name="arrow" />
+            </button>
+            <p className="form-switch">
+              Remember your password? <Link to="/login">Back to login</Link>
+            </p>
+          </form>
+        )}
+      </div>
+    </main>
+  )
 }
 
 function App() {
-  return <Shell><Routes><Route path="/" element={<LandingPage />} /><Route path="/login" element={<AccessPage />} /><Route path="/register" element={<AccessPage register />} /><Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} /><Route path="/resumes" element={<ProtectedRoute><ResumesPage /></ProtectedRoute>} /><Route path="/jobs" element={<ProtectedRoute><JobsPage /></ProtectedRoute>} /><Route path="/jobs/:id" element={<ProtectedRoute><JobDetailsPage /></ProtectedRoute>} /><Route path="/applications" element={<ProtectedRoute><ApplicationsPage /></ProtectedRoute>} /><Route path="/automation" element={<ProtectedRoute><AutomationDashboard /></ProtectedRoute>} /><Route path="/analysis" element={<ProtectedRoute><AnalysisPage /></ProtectedRoute>} /><Route path="/skill-gap" element={<ProtectedRoute><SkillGapPage /></ProtectedRoute>} /><Route path="/interview-prep" element={<ProtectedRoute><InterviewPrepPage /></ProtectedRoute>} /><Route path="/mock-interview" element={<ProtectedRoute><MockInterviewPage /></ProtectedRoute>} /><Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />{navItems.slice(10).map((item) => <Route key={item.to} path={item.to} element={<ProtectedRoute><PlaceholderPage title={item.label} description="This workspace is ready for your career data and next best action." /></ProtectedRoute>} />)}<Route path="*" element={<LandingPage />} /></Routes></Shell>
+  return <Shell><Routes><Route path="/" element={<LandingPage />} /><Route path="/login" element={<AccessPage />} /><Route path="/register" element={<AccessPage register />} /><Route path="/forgot-password" element={<ForgotPasswordPage />} /><Route path="/reset-password" element={<ResetPasswordPage />} /><Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} /><Route path="/resumes" element={<ProtectedRoute><ResumesPage /></ProtectedRoute>} /><Route path="/jobs" element={<ProtectedRoute><JobsPage /></ProtectedRoute>} /><Route path="/jobs/:id" element={<ProtectedRoute><JobDetailsPage /></ProtectedRoute>} /><Route path="/applications" element={<ProtectedRoute><ApplicationsPage /></ProtectedRoute>} /><Route path="/automation" element={<ProtectedRoute><AutomationDashboard /></ProtectedRoute>} /><Route path="/analysis" element={<ProtectedRoute><AnalysisPage /></ProtectedRoute>} /><Route path="/skill-gap" element={<ProtectedRoute><SkillGapPage /></ProtectedRoute>} /><Route path="/interview-prep" element={<ProtectedRoute><InterviewPrepPage /></ProtectedRoute>} /><Route path="/mock-interview" element={<ProtectedRoute><MockInterviewPage /></ProtectedRoute>} /><Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />{navItems.slice(10).map((item) => <Route key={item.to} path={item.to} element={<ProtectedRoute><PlaceholderPage title={item.label} description="This workspace is ready for your career data and next best action." /></ProtectedRoute>} />)}<Route path="*" element={<LandingPage />} /></Routes></Shell>
 }
 
 export default App

@@ -1,6 +1,6 @@
 import type { SVGProps } from 'react'
 
-export type IconName = 'grid' | 'file' | 'briefcase' | 'send' | 'spark' | 'book' | 'mic' | 'chat' | 'chart' | 'chevron' | 'arrow' | 'refresh' | 'checkCircle' | 'check' | 'play'
+export type IconName = 'grid' | 'file' | 'briefcase' | 'send' | 'spark' | 'book' | 'mic' | 'chat' | 'chart' | 'chevron' | 'arrow' | 'refresh' | 'checkCircle' | 'check' | 'play' | 'search' | 'link'
 
 const paths: Record<IconName, string> = {
   grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
@@ -18,6 +18,8 @@ const paths: Record<IconName, string> = {
   checkCircle: 'M22 11.08V12a10 10 0 1 1-5.93-9.14',
   check: 'M20 6L9 17l-5-5',
   play: 'm8 5 11 7-11 7z',
+  search: 'M21 21l-4.35-4.35M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0z',
+  link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
 }
 
 export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGElement>) {

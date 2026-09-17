@@ -56,12 +56,15 @@ def get_adapter_registry() -> CompanyAdapterRegistry:
     if _REGISTRY_INSTANCE is None:
         from .generic_adapter import GenericCompanyAdapter
         from .mock_adapter import MockCompanyAdapter
+        from .naukri_adapter import NaukriCompanyAdapter
 
         reg = CompanyAdapterRegistry()
         generic = GenericCompanyAdapter()
         mock = MockCompanyAdapter()
+        naukri = NaukriCompanyAdapter()
         reg.register(generic, is_generic=True)
         reg.register(mock, is_generic=False)
+        reg.register(naukri, is_generic=False)
         _REGISTRY_INSTANCE = reg
     return _REGISTRY_INSTANCE
 

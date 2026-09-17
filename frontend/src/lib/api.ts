@@ -105,6 +105,8 @@ export type AutomationActionLog = {
   result: string
   error_message: string | null
   screenshot_path: string | null
+  current_url?: string | null
+  page_title?: string | null
   created_at: string
 }
 
@@ -116,6 +118,8 @@ export type AutomationRun = {
   company: string
   job_title: string
   job_url: string | null
+  current_url?: string | null
+  page_title?: string | null
   status: string
   current_step: string | null
   error_message: string | null
@@ -165,6 +169,11 @@ export type AutomationSetting = {
   delay_between_actions_ms: number
   created_at: string
   updated_at: string
+}
+
+export async function getResumes() {
+  const response = await api.get<Resume[]>('/resumes')
+  return response.data
 }
 
 export async function uploadResume(file: File, onProgress: (progress: number) => void) {
@@ -259,6 +268,136 @@ export async function getAutomationSettings() {
 
 export async function updateAutomationSettings(payload: Partial<AutomationSetting>) {
   const response = await api.put<AutomationSetting>('/automation/settings', payload)
+  return response.data
+}
+
+export type JobSearchConfig = {
+  id: string
+  user_id: string
+  desired_job_title: string
+  desired_location: string
+  years_of_experience: number
+  platform_search_url: string
+  specific_company?: string | null
+  active_resume_id?: string | null
+  max_jobs_to_discover: number
+  min_match_score?: number
+  skip_already_applied?: boolean
+  schedule_interval?: string
+  is_active: boolean
+  last_searched_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type DiscoveredJob = {
+  id: string
+  user_id: string
+  config_id?: string | null
+  company: string
+  exact_title: string
+  job_url: string
+  location?: string | null
+  requisition_id?: string | null
+  experience_raw?: string | null
+  platform: string
+  raw_description?: string | null
+  match_score: number
+  title_score: number
+  skills_score: number
+  location_score: number
+  experience_score: number
+  is_matched: boolean
+  match_reasons_json?: string | null
+  match_breakdown_json?: string | null
+  matched_skills_json?: string | null
+  missing_skills_json?: string | null
+  matched_skills?: string[]
+  missing_skills?: string[]
+  status: string
+  automation_run_id?: string | null
+  discovered_at: string
+  updated_at: string
+}
+
+export async function getJobSearchConfig() {
+  const response = await api.get<JobSearchConfig | null>('/automation/search/config')
+  return response.data
+}
+
+export async function saveJobSearchConfig(payload: {
+  desired_job_title: string
+  desired_location: string
+  years_of_experience: number
+  platform_search_url: string
+  specific_company?: string
+  active_resume_id?: string
+  max_jobs_to_discover?: number
+  min_match_score?: number
+  skip_already_applied?: boolean
+  schedule_interval?: string
+}) {
+  const response = await api.post<JobSearchConfig>('/automation/search/config', payload)
+  return response.data
+}
+
+export async function triggerJobDiscovery(payload?: {
+  config_id?: string
+  search_url?: string
+  max_results?: number
+  min_match_score?: number
+  skip_already_applied?: boolean
+}) {
+  const response = await api.post<{
+    total_discovered: number
+    total_matched: number
+    new_candidates_saved: number
+    jobs: DiscoveredJob[]
+  }>('/automation/search/discover', payload || {})
+  return response.data
+}
+
+export async function getDiscoveredJobs(statusFilter?: string) {
+  const response = await api.get<DiscoveredJob[]>('/automation/search/jobs', {
+    params: statusFilter ? { status: statusFilter } : undefined,
+  })
+  return response.data
+}
+
+export async function queueDiscoveredJob(jobId: string) {
+  const response = await api.post<DiscoveredJob>(`/automation/search/jobs/${jobId}/queue`)
+  return response.data
+}
+
+export async function applyDiscoveredJob(jobId: string) {
+  const response = await api.post<AutomationRun>(`/automation/search/jobs/${jobId}/apply`)
+  return response.data
+}
+
+export type ForgotPasswordResponse = {
+  message: string
+  dev_reset_url?: string | null
+}
+
+export type ResetPasswordResponse = {
+  message: string
+}
+
+export async function forgotPassword(email: string): Promise<ForgotPasswordResponse> {
+  const response = await api.post<ForgotPasswordResponse>('/auth/forgot-password', { email })
+  return response.data
+}
+
+export async function resetPassword(
+  token: string,
+  new_password: string,
+  confirm_password: string,
+): Promise<ResetPasswordResponse> {
+  const response = await api.post<ResetPasswordResponse>('/auth/reset-password', {
+    token,
+    new_password,
+    confirm_password,
+  })
   return response.data
 }
 

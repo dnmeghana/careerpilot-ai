@@ -1,7 +1,10 @@
 from datetime import date, datetime
+import json
+from typing import Any
 from uuid import UUID
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, EmailStr, Field, TypeAdapter, field_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, EmailStr, Field, TypeAdapter, field_validator, computed_field
 
 
 class UserCreate(BaseModel):
@@ -45,6 +48,32 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    dev_reset_url: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1)
+    new_password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("confirm_password")
+    @classmethod
+    def passwords_must_match(cls, value: str, info) -> str:
+        if "new_password" in info.data and value != info.data["new_password"]:
+            raise ValueError("Passwords do not match")
+        return value
+
+
+class ResetPasswordResponse(BaseModel):
+    message: str
 
 
 class ResumeResponse(BaseModel):
@@ -573,3 +602,103 @@ class JobMatchScoreResponse(BaseModel):
     normalized_job_title: str
     reasons: list[str] = []
     breakdown: dict[str, Any] = {}
+    score_breakdown: dict[str, Any] = {}
+
+
+class JobSearchConfigRequest(BaseModel):
+    desired_job_title: str = Field(min_length=1, max_length=255)
+    desired_location: str = Field(min_length=1, max_length=255)
+    years_of_experience: int = Field(ge=0, le=50, default=0)
+    platform_search_url: str = Field(min_length=5, max_length=2048)
+    specific_company: str | None = Field(default=None, max_length=255)
+    active_resume_id: UUID | None = None
+    max_jobs_to_discover: int = Field(ge=1, le=50, default=10)
+    min_match_score: float = Field(ge=0.0, le=100.0, default=50.0)
+    skip_already_applied: bool = True
+    schedule_interval: str = Field(default="manual", max_length=32)
+
+
+class JobSearchConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    desired_job_title: str
+    desired_location: str
+    years_of_experience: int
+    platform_search_url: str
+    specific_company: str | None = None
+    active_resume_id: UUID | None = None
+    max_jobs_to_discover: int
+    min_match_score: float = 50.0
+    skip_already_applied: bool = True
+    schedule_interval: str = "manual"
+    is_active: bool
+    last_searched_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DiscoveredJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    config_id: UUID | None = None
+    company: str
+    exact_title: str
+    job_url: str
+    location: str | None = None
+    requisition_id: str | None = None
+    experience_raw: str | None = None
+    platform: str
+    raw_description: str | None = None
+    match_score: float
+    title_score: float
+    skills_score: float
+    location_score: float
+    experience_score: float
+    is_matched: bool
+    match_reasons_json: str | None = None
+    match_breakdown_json: str | None = None
+    matched_skills_json: str | None = None
+    missing_skills_json: str | None = None
+    status: str
+    automation_run_id: UUID | None = None
+    discovered_at: datetime
+    updated_at: datetime
+
+    @computed_field
+    @property
+    def matched_skills(self) -> list[str]:
+        if not self.matched_skills_json:
+            return []
+        try:
+            return json.loads(self.matched_skills_json)
+        except Exception:
+            return []
+
+    @computed_field
+    @property
+    def missing_skills(self) -> list[str]:
+        if not self.missing_skills_json:
+            return []
+        try:
+            return json.loads(self.missing_skills_json)
+        except Exception:
+            return []
+
+
+class JobDiscoveryTriggerRequest(BaseModel):
+    config_id: UUID | None = None
+    search_url: str | None = None
+    max_results: int | None = Field(default=None, ge=1, le=50)
+    min_match_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    skip_already_applied: bool | None = None
+
+
+class JobDiscoveryResultResponse(BaseModel):
+    total_discovered: int
+    total_matched: int
+    new_candidates_saved: int
+    jobs: list[DiscoveredJobResponse] = []
